@@ -26,11 +26,14 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import { DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import { analyzeProject, buildSmartPlacements } from "../lib/analysis-engine";
+import type { AnalysisProgress, AnalysisResult } from "../lib/analysis-engine";
 
 type MediaAsset = {
   id: string;
   name: string;
+  file: File;
   url: string;
   kind: "image" | "video";
   color: string;
@@ -129,7 +132,6 @@ export default function Home() {
   const [sections, setSections] = useState<SectionRule[]>(initialSections);
   const [beats, setBeats] = useState<number[]>(DEMO_BEATS);
   const [bpm, setBpm] = useState(120);
-  const [sensitivity, setSensitivity] = useState(68);
   const [placements, setPlacements] = useState<Placement[]>([]);
   const [selectedSectionId, setSelectedSectionId] = useState(initialSections[2].id);
   const [selectedPlacementId, setSelectedPlacementId] = useState<string | null>(null);
@@ -139,6 +141,8 @@ export default function Home() {
   const [activePanel, setActivePanel] = useState<"section" | "clip">("section");
   const [editorMode, setEditorMode] = useState<"auto" | "pro">("auto");
   const [autoEnergy, setAutoEnergy] = useState<"smooth" | "dynamic" | "maximum">("dynamic");
+  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [analysisProgress, setAnalysisProgress] = useState<AnalysisProgress | null>(null);
 
   const selectedSection = sections.find((item) => item.id === selectedSectionId) ?? sections[0];
   const selectedPlacement = placements.find((item) => item.id === selectedPlacementId) ?? null;
@@ -147,31 +151,20 @@ export default function Home() {
   );
   const activeAsset = activePlacement ? assets.find((asset) => asset.id === activePlacement.assetId) : null;
   const visibleBeats = useMemo(() => beats.filter((beat) => beat <= duration), [beats, duration]);
-
-  const makeAutoPlacements = (media: MediaAsset[], rhythm: number[]) => {
-    if (!media.length) return [];
-    const base = autoEnergy === "smooth" ? 8 : autoEnergy === "dynamic" ? 4 : 2;
-    const baseDuration = autoEnergy === "smooth" ? 0.62 : autoEnergy === "dynamic" ? 0.3 : 0.16;
-    return rhythm.flatMap((beat, index) => {
-      const progress = beat / Math.max(duration, 1);
-      const isPeakZone = (progress > 0.31 && progress < 0.48) || (progress > 0.68 && progress < 0.84);
-      const spacing = isPeakZone ? Math.max(1, base / 2) : base;
-      const isPrimary = index % spacing === 0;
-      const isAccent = autoEnergy !== "smooth" && index % (base * 8) === base + 1;
-      if (!isPrimary && !isAccent) return [];
-      const section = sections.find((item) => beat >= item.start && beat < item.end) ?? sections[0];
-      const asset = media[(index + Math.floor(progress * 10)) % media.length];
-      return [{
-        id: `auto-${index}-${asset.id}`,
-        assetId: asset.id,
-        sectionId: section.id,
-        start: beat,
-        duration: Math.min(baseDuration * (isAccent ? 0.55 : 1 + (index % 3) * 0.18), duration - beat),
-        scale: 108 + (index % 4) * (autoEnergy === "maximum" ? 10 : 6),
-        opacity: isAccent ? 82 : 100,
-      }];
+  const energyBars = useMemo(() => {
+    if (!analysis?.signals.length) return Array.from({ length: 180 }, () => 8);
+    return Array.from({ length: 180 }, (_, index) => {
+      const start = Math.floor((index / 180) * analysis.signals.length);
+      const end = Math.max(start + 1, Math.floor(((index + 1) / 180) * analysis.signals.length));
+      const points = analysis.signals.slice(start, end);
+      const level = Math.max(...points.map((point) => point.energy * 0.68 + point.onset * 0.32));
+      return Math.round(8 + level * 88);
     });
-  };
+  }, [analysis]);
+  const overallAnalysisProgress = analysisProgress
+    ? ({ audio: 0, footage: 25, effects: 70, edit: 88 }[analysisProgress.phase]
+      + analysisProgress.progress * ({ audio: 25, footage: 45, effects: 18, edit: 12 }[analysisProgress.phase]))
+    : 0;
 
   useEffect(() => {
     return () => {
@@ -207,7 +200,8 @@ export default function Home() {
       setCurrentTime(0);
       setBeats(Array.from({ length: Math.ceil(nextDuration * 2) }, (_, index) => index * 0.5));
       setPlacements([]);
-      setStatus("Source ready. Analyze audio or place effects with the current grid.");
+      setAnalysis(null);
+      setStatus("Source ready. The engine will inspect its audio and visual frames.");
     };
     setMainFile(file);
     setMainUrl(url);
@@ -220,6 +214,7 @@ export default function Home() {
       .map((file, index) => ({
         id: `${Date.now()}-${index}-${file.name}`,
         name: file.name,
+        file,
         url: URL.createObjectURL(file),
         kind: file.type.startsWith("video/") ? ("video" as const) : ("image" as const),
         color: COLORS[(assets.length + index) % COLORS.length],
@@ -227,58 +222,61 @@ export default function Home() {
     if (!incoming.length) return;
     const next = [...assets, ...incoming];
     setAssets(next);
-    setPlacements(editorMode === "auto" ? makeAutoPlacements(next, visibleBeats) : makePlacements(next, visibleBeats, sections));
-    setStatus(`${incoming.length} effect${incoming.length === 1 ? "" : "s"} ready for the cut.`);
+    setPlacements(editorMode === "auto" ? [] : makePlacements(next, visibleBeats, sections));
+    setAnalysis(null);
+    setStatus(`${incoming.length} effect${incoming.length === 1 ? "" : "s"} ready to be visually profiled.`);
   };
 
-  const analyzeAudio = async (auto = false) => {
+  const runAnalysis = async (auto = false) => {
     if (!mainFile) {
-      setStatus("Add the main video first so ScenePilot can hear the track.");
+      setStatus("Add the main video first so ScenePilot can inspect it.");
       mainInputRef.current?.click();
       return;
     }
+    if (!assets.length) {
+      setStatus("Add at least one effect so ScenePilot can inspect its visual peak.");
+      assetInputRef.current?.click();
+      return;
+    }
     setAnalyzing(true);
-    setStatus("Listening for transients, kicks, and section energy...");
+    setStatus("Opening the real analysis engine...");
     try {
-      const context = new AudioContext();
-      const audio = await context.decodeAudioData(await mainFile.arrayBuffer());
-      const channel = audio.getChannelData(0);
-      const sampleRate = audio.sampleRate;
-      const windowSize = 1024;
-      const energies: number[] = [];
-      for (let i = 0; i < channel.length; i += windowSize) {
-        let sum = 0;
-        for (let j = i; j < Math.min(i + windowSize, channel.length); j++) sum += channel[j] * channel[j];
-        energies.push(Math.sqrt(sum / windowSize));
-      }
-      const detected: number[] = [];
-      const thresholdMultiplier = 1.72 - sensitivity / 140;
-      let lastTime = -1;
-      for (let i = 8; i < energies.length - 2; i++) {
-        const local = energies.slice(i - 8, i).reduce((sum, value) => sum + value, 0) / 8;
-        const time = (i * windowSize) / sampleRate;
-        if (energies[i] > local * thresholdMultiplier && energies[i] > energies[i - 1] && time - lastTime > 0.22) {
-          detected.push(time);
-          lastTime = time;
-        }
-      }
-      const finalBeats = detected.length > 24 ? detected : Array.from({ length: Math.ceil(audio.duration * 2) }, (_, i) => i * 0.5);
-      const intervals = finalBeats.slice(1).map((value, index) => value - finalBeats[index]).filter((value) => value > 0.25 && value < 1.2);
-      const median = intervals.sort((a, b) => a - b)[Math.floor(intervals.length / 2)] || 0.5;
-      setBpm(Math.round(60 / median));
-      setBeats(finalBeats);
-      const next = auto ? makeAutoPlacements(assets, finalBeats) : makePlacements(assets, finalBeats, sections);
+      const result = await analyzeProject(
+        mainFile,
+        mainUrl,
+        duration,
+        assets.map(({ id, file, url, kind }) => ({ id, file, url, kind })),
+        (progress) => {
+          setAnalysisProgress(progress);
+          setStatus(progress.message);
+        },
+      );
+      const detectedSections: SectionRule[] = result.sections.map((section, index) => ({
+        id: section.id,
+        name: section.name,
+        start: section.start,
+        end: section.end,
+        every: section.energy > 0.68 ? 2 : section.energy > 0.4 ? 4 : 8,
+        duration: section.energy > 0.68 ? 0.22 : 0.42,
+        scale: Math.round(108 + section.energy * 28),
+        enabled: true,
+        color: COLORS[index % COLORS.length],
+      }));
+      const next = auto
+        ? buildSmartPlacements(result, assets.map((asset) => asset.id), autoEnergy)
+        : makePlacements(assets, result.beats, detectedSections);
+      setAnalysis(result);
+      setBpm(result.bpm);
+      setBeats(result.beats);
+      setSections(detectedSections);
+      setSelectedSectionId(detectedSections[0]?.id ?? selectedSectionId);
       setPlacements(next);
-      setStatus(auto ? `Auto cut ready — ${next.length} dynamic hits across the track.` : `${finalBeats.length} rhythmic edit points found. Section rules are now live.`);
-      await context.close();
-    } catch {
-      const fallback = Array.from({ length: Math.ceil(duration * bpm / 60) }, (_, index) => index * (60 / bpm));
-      setBeats(fallback);
-      const next = auto ? makeAutoPlacements(assets, fallback) : makePlacements(assets, fallback, sections);
-      setPlacements(next);
-      setStatus(auto ? `Auto cut ready — ${next.length} hits built from the BPM grid.` : "Using the BPM grid. You can still shape every section and placement manually.");
+      setStatus(`${result.framesAnalyzed} frames, ${result.sceneCuts.length} cuts, ${result.beats.length} beats — ${next.length} placements built.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? `Analysis stopped: ${error.message}` : "Analysis stopped because this media could not be decoded.");
     } finally {
       setAnalyzing(false);
+      setAnalysisProgress(null);
     }
   };
 
@@ -293,7 +291,15 @@ export default function Home() {
       assetInputRef.current?.click();
       return;
     }
-    await analyzeAudio(true);
+    await runAnalysis(true);
+  };
+
+  const chooseAutoEnergy = (energy: "smooth" | "dynamic" | "maximum") => {
+    setAutoEnergy(energy);
+    if (!analysis) return;
+    const next = buildSmartPlacements(analysis, assets.map((asset) => asset.id), energy);
+    setPlacements(next);
+    setStatus(`${energy.toUpperCase()} rebuilt from ${analysis.beats.length} measured beats and ${analysis.sceneCuts.length} scene cuts.`);
   };
 
   const rebuildPlacements = () => {
@@ -352,6 +358,8 @@ export default function Home() {
     if (target) URL.revokeObjectURL(target.url);
     setAssets((items) => items.filter((asset) => asset.id !== id));
     setPlacements((items) => items.filter((placement) => placement.assetId !== id));
+    setAnalysis(null);
+    setStatus("Effect removed. Analyze again to refresh its visual profile.");
   };
 
   const exportPlan = () => {
@@ -360,6 +368,12 @@ export default function Home() {
       duration,
       bpm,
       beatCount: beats.length,
+      analysis: analysis ? {
+        tempoConfidence: analysis.confidence,
+        framesAnalyzed: analysis.framesAnalyzed,
+        sceneCuts: analysis.sceneCuts,
+        effectProfiles: analysis.effects,
+      } : null,
       sections,
       assets: assets.map(({ id, name, kind }) => ({ id, name, kind })),
       placements,
@@ -449,11 +463,23 @@ export default function Home() {
               <div className="energy-control">
                 <div><small>03 / ENERGY</small><strong>How hard should it hit?</strong></div>
                 <div className="energy-options">
-                  <button className={autoEnergy === "smooth" ? "active" : ""} onClick={() => setAutoEnergy("smooth")}><i /><span>SMOOTH</span></button>
-                  <button className={autoEnergy === "dynamic" ? "active" : ""} onClick={() => setAutoEnergy("dynamic")}><i /><i /><span>DYNAMIC</span></button>
-                  <button className={autoEnergy === "maximum" ? "active" : ""} onClick={() => setAutoEnergy("maximum")}><i /><i /><i /><span>MAXIMUM</span></button>
+                  <button className={autoEnergy === "smooth" ? "active" : ""} onClick={() => chooseAutoEnergy("smooth")}><i /><span>SMOOTH</span></button>
+                  <button className={autoEnergy === "dynamic" ? "active" : ""} onClick={() => chooseAutoEnergy("dynamic")}><i /><i /><span>DYNAMIC</span></button>
+                  <button className={autoEnergy === "maximum" ? "active" : ""} onClick={() => chooseAutoEnergy("maximum")}><i /><i /><i /><span>MAXIMUM</span></button>
                 </div>
               </div>
+
+              {analyzing && analysisProgress && (
+                <div className="analysis-progress" aria-live="polite">
+                  <div className="analysis-phase">
+                    {(["audio", "footage", "effects", "edit"] as const).map((phase) => (
+                      <span key={phase} className={phase === analysisProgress.phase ? "active" : ""}>{phase}</span>
+                    ))}
+                  </div>
+                  <div className="analysis-progress-track"><i style={{ width: `${overallAnalysisProgress}%` }} /></div>
+                  <p>{analysisProgress.message}</p>
+                </div>
+              )}
 
               <button className="auto-cut-button" onClick={runAutoCut} disabled={analyzing}>
                 {analyzing ? <Activity size={19} /> : <WandSparkles size={19} />}
@@ -463,6 +489,8 @@ export default function Home() {
               <div className="auto-readout">
                 <span><Activity size={14} /><strong>{bpm}</strong> BPM</span>
                 <span><Zap size={14} /><strong>{placements.length}</strong> HITS</span>
+                {analysis && <span><Film size={14} /><strong>{analysis.framesAnalyzed}</strong> FRAMES</span>}
+                {analysis && <span><Scissors size={14} /><strong>{analysis.sceneCuts.length}</strong> CUTS</span>}
                 <p>{status}</p>
                 {placements.length > 0 && <button onClick={exportPlan}><Download size={14} /> Export</button>}
               </div>
@@ -512,7 +540,7 @@ export default function Home() {
             <div><Activity size={15} /><strong>{bpm}</strong><span>BPM</span></div>
             <div><Layers3 size={15} /><strong>{placements.length}</strong><span>placements</span></div>
             <p>{status}</p>
-            <button className="analyze-button" onClick={() => analyzeAudio(false)} disabled={analyzing}><WandSparkles size={16} /> {analyzing ? "Analyzing..." : "Analyze track"}</button>
+            <button className="analyze-button" onClick={() => runAnalysis(false)} disabled={analyzing}><WandSparkles size={16} /> {analyzing ? "Analyzing..." : "Analyze media"}</button>
           </div>
         </div>
 
@@ -551,7 +579,6 @@ export default function Home() {
               <label className="field"><span>Place every</span><div className="stepper"><button onClick={() => updateSection({ every: Math.max(1, selectedSection.every - 1) })}>−</button><strong>{selectedSection.every} beats</strong><button onClick={() => updateSection({ every: selectedSection.every + 1 })}>+</button></div></label>
               <label className="field"><span>Effect duration</span><div className="value-line"><input type="range" min="0.1" max="4" step="0.05" value={selectedSection.duration} onChange={(event) => updateSection({ duration: Number(event.target.value) })} /><strong>{selectedSection.duration.toFixed(2)}s</strong></div></label>
               <label className="field"><span>Scale</span><div className="value-line"><input type="range" min="50" max="180" value={selectedSection.scale} onChange={(event) => updateSection({ scale: Number(event.target.value) })} /><strong>{selectedSection.scale}%</strong></div></label>
-              <label className="field"><span>Beat sensitivity</span><div className="value-line"><input type="range" min="20" max="95" value={sensitivity} onChange={(event) => setSensitivity(Number(event.target.value))} /><strong>{sensitivity}</strong></div></label>
               <div className="inspector-actions"><button onClick={splitAtPlayhead}><Scissors size={15} /> Split at playhead</button><button className="primary" onClick={rebuildPlacements}><Sparkles size={15} /> Fill timeline</button></div>
             </div>
           )}
@@ -588,6 +615,7 @@ export default function Home() {
               <div className="track-label"><Activity size={15} /><span>BEATS</span></div>
               <div className="track-content">
                 {visibleBeats.map((beat, index) => <i key={`${beat}-${index}`} className={index % 4 === 0 ? "major-beat" : "beat"} style={{ left: `${(beat / duration) * 100}%` }} />)}
+                {analysis?.sceneCuts.map((cut, index) => <i key={`scene-${index}`} className="scene-marker" style={{ left: `${(cut.time / duration) * 100}%`, opacity: 0.45 + cut.confidence * 0.55 }} title={`Detected scene cut at ${formatTime(cut.time)}`} />)}
                 {Array.from({ length: Math.floor(duration / 15) + 1 }, (_, index) => index * 15).map((time) => <span className="ruler-time" key={time} style={{ left: `${(time / duration) * 100}%` }}>{formatTime(time).slice(0, 5)}</span>)}
               </div>
             </div>
@@ -606,7 +634,7 @@ export default function Home() {
             </div>
             <div className="energy-lane">
               <div className="track-label"><Zap size={15} /><span>ENERGY</span></div>
-              <div className="track-content"><div className="waveform">{Array.from({ length: 180 }, (_, index) => <i key={index} style={{ height: `${18 + Math.abs(Math.sin(index * 0.37) * 62) + (index % 7) * 2}%` }} />)}</div></div>
+              <div className="track-content"><div className={`waveform ${analysis ? "measured" : ""}`}>{energyBars.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div></div>
             </div>
             <div className="playhead" style={{ left: `calc(132px + (100% - 132px) * ${currentTime / duration})` }}><i /><span>{formatTime(currentTime)}</span></div>
           </div>
