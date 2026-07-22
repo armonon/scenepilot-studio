@@ -1,6 +1,6 @@
 /* global caches, self */
 
-const CACHE_NAME = "scenepilot-standalone-v1";
+const CACHE_NAME = "scenepilot-standalone-v2";
 const CORE_ASSETS = ["/", "/manifest.webmanifest", "/app-icon-192.png", "/app-icon-512.png", "/app-icon-maskable-512.png"];
 
 async function cacheApplicationShell() {
@@ -38,8 +38,8 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  event.respondWith(caches.match(request).then((cached) => cached || fetch(request).then(async (response) => {
+  event.respondWith(fetch(request).then(async (response) => {
     if (response.ok) (await caches.open(CACHE_NAME)).put(request, response.clone());
     return response;
-  })));
+  }).catch(() => caches.match(request).then((response) => response || Response.error())));
 });

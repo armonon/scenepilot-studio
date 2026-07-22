@@ -9,6 +9,8 @@ import {
   Mp4OutputFormat,
   Output,
   QUALITY_HIGH,
+  StreamTarget,
+  type StreamTargetChunk,
   VideoSampleSink,
 } from "mediabunny";
 
@@ -42,12 +44,15 @@ export type RenderTrack = {
   fadeOut: number;
 };
 
-type RenderOptions = {
+export type RenderOptions = {
   mainFile: File;
   assets: RenderAsset[];
   placements: RenderPlacement[];
   tracks?: RenderTrack[];
   duration: number;
+  frameRate?: 24 | 30;
+  maxDimension?: 1280 | 1920;
+  outputStream?: WritableStream<StreamTargetChunk>;
   signal?: AbortSignal;
   onProgress?: (progress: number, message: string) => void;
 };
@@ -59,11 +64,18 @@ function fitInside(sourceWidth: number, sourceHeight: number, targetWidth: numbe
   return { x: (targetWidth - width) / 2, y: (targetHeight - height) / 2, width, height };
 }
 
+export function fitCover(sourceWidth: number, sourceHeight: number, targetWidth: number, targetHeight: number) {
+  const scale = Math.max(targetWidth / sourceWidth, targetHeight / sourceHeight);
+  const width = sourceWidth * scale;
+  const height = sourceHeight * scale;
+  return { x: (targetWidth - width) / 2, y: (targetHeight - height) / 2, width, height };
+}
+
 function abortError(signal?: AbortSignal) {
   signal?.throwIfAborted();
 }
 
-export async function renderProject({ mainFile, assets, placements, tracks = [], duration, signal, onProgress }: RenderOptions) {
+export async function renderProject({ mainFile, assets, placements, tracks = [], duration, frameRate = 30, maxDimension = 1920, outputStream, signal, onProgress }: RenderOptions) {
   if (!("VideoEncoder" in window) || !("VideoDecoder" in window)) {
     throw new Error("This browser cannot render video yet. Open ScenePilot in a current Chrome or Edge browser.");
   }
@@ -80,7 +92,6 @@ export async function renderProject({ mainFile, assets, placements, tracks = [],
     if (!mainVideoTrack && !audioTrack) throw new Error("The main file has no decodable audio or video track.");
     const sourceWidth = mainVideoTrack ? await mainVideoTrack.getDisplayWidth() : 1280;
     const sourceHeight = mainVideoTrack ? await mainVideoTrack.getDisplayHeight() : 720;
-    const maxDimension = 1280;
     const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
     const width = Math.max(2, Math.round(sourceWidth * scale / 2) * 2);
     const height = Math.max(2, Math.round(sourceHeight * scale / 2) * 2);
@@ -107,10 +118,10 @@ export async function renderProject({ mainFile, assets, placements, tracks = [],
       });
     }
 
-    const target = new BufferTarget();
-    output = new Output({ format: new Mp4OutputFormat({ fastStart: "in-memory" }), target });
+    const target = outputStream ? new StreamTarget(outputStream, { chunked: true }) : new BufferTarget();
+    output = new Output({ format: new Mp4OutputFormat({ fastStart: outputStream ? "reserve" : "in-memory" }), target });
     const videoSource = new CanvasSource(canvas, { codec: "avc", bitrate: QUALITY_HIGH });
-    output.addVideoTrack(videoSource, { frameRate: 24 });
+    output.addVideoTrack(videoSource, { frameRate });
     const audioSource = audioTrack ? new AudioSampleSource({ codec: "aac", bitrate: QUALITY_HIGH }) : null;
     if (audioSource) output.addAudioTrack(audioSource);
     await output.start();
@@ -125,7 +136,7 @@ export async function renderProject({ mainFile, assets, placements, tracks = [],
       }
     }
 
-    const fps = 24;
+    const fps = frameRate;
     const frameDuration = 1 / fps;
     const frameCount = Math.max(1, Math.ceil(duration * fps));
     const timestamps = Array.from({ length: frameCount }, (_, index) => index * frameDuration);
@@ -160,22 +171,26 @@ export async function renderProject({ mainFile, assets, placements, tracks = [],
         const zoom = placement.scale / 100;
         const drawWidth = width * zoom;
         const drawHeight = height * zoom;
-        const x = (width - drawWidth) / 2;
-        const y = (height - drawHeight) / 2;
+        const targetX = (width - drawWidth) / 2;
+        const targetY = (height - drawHeight) / 2;
         context.save();
         context.globalAlpha = placement.opacity / 100 * (track?.opacity ?? 100) / 100 * Math.min(fadeIn, fadeOut);
         context.globalCompositeOperation = track?.blend === "normal" ? "source-over" : track?.blend ?? "screen";
         context.filter = `hue-rotate(${track?.hue ?? 0}deg) saturate(${track?.saturation ?? 100}%) brightness(${track?.brightness ?? 100}%) drop-shadow(0 0 ${track?.glow ?? 0}px ${track?.color ?? "#ffffff"})`;
         if (asset.kind === "image") {
           const bitmap = bitmaps.get(asset.id);
-          if (bitmap) context.drawImage(bitmap, x, y, drawWidth, drawHeight);
+          if (bitmap) {
+            const box = fitCover(bitmap.width, bitmap.height, drawWidth, drawHeight);
+            context.drawImage(bitmap, targetX + box.x, targetY + box.y, box.width, box.height);
+          }
         } else {
           const reader = assetReaders.get(asset.id);
           if (reader) {
             const localTime = Math.min(reader.duration - 0.001, (placement.sourceStart ?? 0) + time - placement.start);
             const effectSample = await reader.sink.getSample(Math.max(0, localTime));
             if (effectSample) {
-              effectSample.draw(context, x, y, drawWidth, drawHeight);
+              const box = fitCover(effectSample.displayWidth, effectSample.displayHeight, drawWidth, drawHeight);
+              effectSample.draw(context, targetX + box.x, targetY + box.y, box.width, box.height);
               effectSample.close();
             }
           }
@@ -193,9 +208,12 @@ export async function renderProject({ mainFile, assets, placements, tracks = [],
 
     onProgress?.(0.98, "Finalizing MP4");
     await output.finalize();
-    if (!target.buffer) throw new Error("The renderer produced an empty file.");
     onProgress?.(1, "Render complete");
-    return new Blob([target.buffer], { type: "video/mp4" });
+    if (target instanceof BufferTarget) {
+      if (!target.buffer) throw new Error("The renderer produced an empty file.");
+      return new Blob([target.buffer], { type: "video/mp4" });
+    }
+    return null;
   } catch (error) {
     if (output && output.state !== "finalized" && output.state !== "canceled") await output.cancel().catch(() => undefined);
     throw error;

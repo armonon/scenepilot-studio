@@ -72,10 +72,13 @@ test("keeps the analysis, render, persistence, and standalone engines connected"
   assert.match(page, /StandaloneRuntime/);
   assert.match(layout, /manifest: "\/manifest\.webmanifest"/);
   assert.equal(JSON.parse(manifest).display, "standalone");
-  assert.match(serviceWorker, /scenepilot-standalone-v1/);
+  assert.match(serviceWorker, /scenepilot-standalone-v2/);
   assert.match(serviceWorker, /request\.mode === "navigate"/);
+  assert.match(serviceWorker, /fetch\(request\).*caches\.match\(request\)/s);
   assert.match(desktop, /checkForUpdates/);
   assert.match(desktop, /releases\/latest/);
   assert.match(desktop, /downloadURL/);
+  assert.match(desktop, /loadFile\(DESKTOP_ENTRY\)/);
+  assert.match(desktop, /verifyFileDigest/);
   assert.match(releaseWorkflow, /gh release create/);
 });

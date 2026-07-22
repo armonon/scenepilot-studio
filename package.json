@@ -1,6 +1,6 @@
 {
   "name": "scenepilot-studio",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "private": true,
   "main": "electron/main.js",
   "engines": {
@@ -10,39 +10,53 @@
     "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
     "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
-    "desktop:dev": "electron .",
-    "desktop:dist": "electron-builder --projectDir electron --mac dmg --arm64 --publish never",
+    "desktop:renderer": "vite build --config vite.desktop.config.ts",
+    "desktop:dev": "npm run desktop:renderer && electron .",
+    "desktop:dist": "npm run desktop:renderer && electron-builder --projectDir electron --mac dmg --arm64 --publish never",
     "test": "npm run build && node --experimental-strip-types --test tests/*.test.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern electron/renderer --ignore-pattern release",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",
     "lucide-react": "^1.25.0",
     "mediabunny": "^1.51.0",
-    "next": "16.2.6",
-    "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "next": "16.2.11",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.37.1",
-    "@tailwindcss/postcss": "4.2.1",
+    "@cloudflare/vite-plugin": "1.46.0",
+    "@cloudflare/workers-types": "5.20260721.1",
+    "@tailwindcss/postcss": "4.3.3",
     "@types/node": "22.19.19",
-    "@types/react": "19.2.14",
+    "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
-    "@vitejs/plugin-react": "6.0.2",
-    "@vitejs/plugin-rsc": "0.5.26",
+    "@vitejs/plugin-react": "6.0.4",
+    "@vitejs/plugin-rsc": "0.5.29",
     "drizzle-kit": "0.31.10",
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
     "eslint": "9.39.4",
-    "eslint-config-next": "16.2.6",
-    "react-server-dom-webpack": "19.2.6",
-    "tailwindcss": "4.2.1",
+    "eslint-config-next": "16.2.11",
+    "react-server-dom-webpack": "19.2.8",
+    "tailwindcss": "4.3.3",
     "typescript": "5.9.3",
     "vinext": "0.0.50",
-    "vite": "8.0.13",
-    "wrangler": "4.92.0"
+    "vite": "8.0.16",
+    "wrangler": "4.113.0"
+  },
+  "overrides": {
+    "@babel/core": "7.29.7",
+    "brace-expansion@1.x": "1.1.16",
+    "brace-expansion@5.x": "5.0.7",
+    "esbuild": "0.28.1",
+    "fast-uri": "3.1.4",
+    "js-yaml": "4.3.0",
+    "postcss": "8.5.22",
+    "sharp": "0.35.3",
+    "undici": "7.28.0",
+    "ws": "8.21.1"
   },
   "type": "module"
 }

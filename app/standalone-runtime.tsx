@@ -20,7 +20,8 @@ export function StandaloneRuntime() {
   const [installed, setInstalled] = useState(isStandalone);
 
   useEffect(() => {
-    if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js");
+    const localDevelopment = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+    if (!localDevelopment && window.location.protocol !== "file:" && "serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js");
     const capturePrompt = (event: Event) => {
       event.preventDefault();
       setInstallPrompt(event as InstallPromptEvent);

@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element -- Effect media uses local blob URLs that Next Image cannot optimize. */
+
 import {
   Activity,
   ChevronDown,
@@ -33,9 +35,10 @@ import {
   Zap,
 } from "lucide-react";
 import { ChangeEvent, DragEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { analyzeProject, buildDirectedPlacements, suggestDirectorPattern } from "../lib/analysis-engine";
+import { analyzeProject, buildDirectedPlacements, hasReliableRhythm, suggestDirectorPattern } from "../lib/analysis-engine";
 import type { AnalysisProgress, AnalysisResult, DirectorPattern, RhythmRate } from "../lib/analysis-engine";
 import { renderProject } from "../lib/render-engine";
+import type { RenderOptions } from "../lib/render-engine";
 import { loadProject, saveProject } from "../lib/project-store";
 import { StandaloneRuntime } from "./standalone-runtime";
 
@@ -198,7 +201,7 @@ function EffectLayer({ asset, placement, track, currentTime, playing }: { asset:
   );
 }
 
-type EditSnapshot = { sections: SectionRule[]; placements: Placement[]; clipTracks: ClipTrack[]; beats: number[]; bpm: number; beatOffset: number; selectedSectionId: string; selectedPlacementId: string | null; selectedTrackId: string };
+type EditSnapshot = { sections: SectionRule[]; placements: Placement[]; clipTracks: ClipTrack[]; beats: number[]; bpm: number; beatOffset: number; autoEnergy: "smooth" | "dynamic" | "maximum"; selectedSectionId: string; selectedPlacementId: string | null; selectedTrackId: string };
 
 export default function Home() {
   const videoRef = useRef<HTMLMediaElement>(null);
@@ -215,6 +218,7 @@ export default function Home() {
   const historyRef = useRef<EditSnapshot[]>([]);
   const futureRef = useRef<EditSnapshot[]>([]);
   const tapTimesRef = useRef<number[]>([]);
+  const continuousEditRef = useRef(false);
   const [mainFile, setMainFile] = useState<File | null>(null);
   const [mainUrl, setMainUrl] = useState("");
   const [mainName, setMainName] = useState("3-minute music video");
@@ -292,12 +296,35 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [analyzing]);
 
-  const snapshot = (): EditSnapshot => ({ sections, placements, clipTracks, beats, bpm, beatOffset, selectedSectionId, selectedPlacementId, selectedTrackId });
+  const snapshot = (): EditSnapshot => ({ sections, placements, clipTracks, beats, bpm, beatOffset, autoEnergy, selectedSectionId, selectedPlacementId, selectedTrackId });
+  const clearHistory = () => {
+    continuousEditRef.current = false;
+    historyRef.current = [];
+    futureRef.current = [];
+    setCanUndo(false);
+    setCanRedo(false);
+  };
   const checkpoint = () => {
     historyRef.current = [...historyRef.current.slice(-49), structuredClone(snapshot())];
     futureRef.current = [];
     setCanUndo(true);
     setCanRedo(false);
+  };
+  const beginContinuousEdit = () => {
+    if (continuousEditRef.current) return;
+    checkpoint();
+    continuousEditRef.current = true;
+  };
+  const endContinuousEdit = () => {
+    continuousEditRef.current = false;
+  };
+  const continuousEditHandlers = {
+    onPointerDown: beginContinuousEdit,
+    onPointerUp: endContinuousEdit,
+    onPointerCancel: endContinuousEdit,
+    onKeyDown: beginContinuousEdit,
+    onKeyUp: endContinuousEdit,
+    onBlur: endContinuousEdit,
   };
   const restoreSnapshot = (value: EditSnapshot) => {
     setSections(value.sections);
@@ -306,6 +333,7 @@ export default function Home() {
     setBeats(value.beats);
     setBpm(value.bpm);
     setBeatOffset(value.beatOffset);
+    setAutoEnergy(value.autoEnergy);
     setSelectedSectionId(value.selectedSectionId);
     setSelectedPlacementId(value.selectedPlacementId);
     setSelectedTrackId(value.selectedTrackId);
@@ -364,12 +392,17 @@ export default function Home() {
       setMainFile(file);
       setMainUrl(url);
       setMainName(file.name);
+      const nextSections = buildSections(nextDuration);
       setDuration(nextDuration);
-      setSections(buildSections(nextDuration));
+      setSections(nextSections);
+      setSelectedSectionId(nextSections[0]?.id ?? "");
       setCurrentTime(0);
+      setBpm(120);
+      setBeatOffset(0);
       setBeats(Array.from({ length: Math.ceil(nextDuration * 2) }, (_, index) => index * 0.5));
       setPlacements([]);
       setAnalysis(null);
+      clearHistory();
       setStatus(file.type.startsWith("audio/")
         ? "Song ready. The engine will map its beats, energy, and musical sections."
         : "Source ready. The engine will inspect its audio and visual frames.");
@@ -410,9 +443,8 @@ export default function Home() {
     if (!incoming.length) return;
     const next = [...assets, ...incoming];
     setAssets(next);
-    setPlacements(editorMode === "auto" ? [] : makePlacements(next, visibleBeats, sections, clipTracks));
     setAnalysis(null);
-    setStatus(`${incoming.length} effect${incoming.length === 1 ? "" : "s"} ready to be visually profiled.`);
+    setStatus(`${incoming.length} effect${incoming.length === 1 ? "" : "s"} added. Your arrangement is unchanged; analyze to profile the new media.`);
   };
 
   const composeDirector = (result: AnalysisResult, rules: SectionRule[], grid = result.beats, intensity = autoEnergy): Placement[] => (
@@ -427,7 +459,7 @@ export default function Home() {
     })
   );
 
-  const runAnalysis = async (auto = false) => {
+  const runAnalysis = async () => {
     if (!mainFile) {
       setStatus("Add a source video or song first so ScenePilot can inspect it.");
       mainInputRef.current?.click();
@@ -468,13 +500,8 @@ export default function Home() {
         rhythm: section.energy > 0.82 ? "double" : section.energy < 0.28 ? "half" : "normal",
         pattern: suggestDirectorPattern(section, index, result.sections.length),
       }));
-      const smart = composeDirector(result, detectedSections);
-      const next = auto ? smart : smart.map((placement) => {
-        const section = detectedSections.find((item) => placement.start >= item.start && placement.start < item.end);
-        const profile = result.effects.find((item) => item.assetId === placement.assetId);
-        const peakWindow = Math.max(0.1, (profile?.peakTime ?? 0) - placement.sourceStart + 0.08);
-        return section ? { ...placement, duration: Math.min(section.end - placement.start, Math.max(section.duration, peakWindow)), scale: section.scale } : placement;
-      });
+      const rhythmReliable = hasReliableRhythm(result);
+      const next = rhythmReliable ? composeDirector(result, detectedSections) : [];
       checkpoint();
       setAnalysis(result);
       setBpm(result.bpm);
@@ -483,7 +510,9 @@ export default function Home() {
       setSections(detectedSections);
       setSelectedSectionId(detectedSections[0]?.id ?? selectedSectionId);
       setPlacements(next);
-      setStatus(`${result.framesAnalyzed} frames, ${result.sceneCuts.length} cuts, ${result.beats.length} beats — ${next.length} placements built.`);
+      setStatus(rhythmReliable
+        ? `${result.framesAnalyzed} frames, ${result.sceneCuts.length} cuts, ${result.beats.length} beats - ${next.length} placements built.`
+        : `Rhythm confidence was too low to make trustworthy cuts. Tap the BPM or adjust the beat grid, then fill the timeline.`);
     } catch (error) {
       if (controller.signal.aborted) setStatus("Analysis canceled. Your current edit is unchanged.");
       else setStatus(error instanceof Error ? `Analysis stopped: ${error.message}` : "Analysis stopped because this media could not be decoded.");
@@ -507,13 +536,13 @@ export default function Home() {
       assetInputRef.current?.click();
       return;
     }
-    await runAnalysis(true);
+    await runAnalysis();
   };
 
   const chooseAutoEnergy = (energy: "smooth" | "dynamic" | "maximum") => {
+    checkpoint();
     setAutoEnergy(energy);
     if (!analysis) return;
-    checkpoint();
     const next = composeDirector(analysis, sections, beats, energy);
     setPlacements(next);
     setStatus(`${energy.toUpperCase()} rebuilt from ${analysis.beats.length} measured beats and ${analysis.sceneCuts.length} scene cuts.`);
@@ -525,11 +554,6 @@ export default function Home() {
     const next = smart ? smart.filter((placement) => {
       const section = sections.find((item) => placement.start >= item.start && placement.start < item.end);
       return section?.enabled ?? false;
-    }).map((placement) => {
-      const section = sections.find((item) => placement.start >= item.start && placement.start < item.end);
-      const profile = analysis?.effects.find((item) => item.assetId === placement.assetId);
-      const peakWindow = Math.max(0.1, (profile?.peakTime ?? 0) - placement.sourceStart + 0.08);
-      return section ? { ...placement, duration: Math.min(section.end - placement.start, Math.max(section.duration, peakWindow)), scale: section.scale } : placement;
     }) : makePlacements(assets, visibleBeats, sections, clipTracks);
     setPlacements(next);
     setSelectedPlacementId(null);
@@ -537,13 +561,13 @@ export default function Home() {
   };
 
   const updateSection = (patch: Partial<SectionRule>) => {
-    checkpoint();
+    if (!continuousEditRef.current) checkpoint();
     setSections((items) => items.map((item) => (item.id === selectedSectionId ? { ...item, ...patch } : item)));
   };
 
   const updatePlacement = (patch: Partial<Placement>) => {
     if (!selectedPlacementId) return;
-    checkpoint();
+    if (!continuousEditRef.current) checkpoint();
     setPlacements((items) => items.map((item) => (item.id === selectedPlacementId ? { ...item, ...patch } : item)));
   };
 
@@ -573,13 +597,13 @@ export default function Home() {
 
   const updateClipTrack = (patch: Partial<ClipTrack>) => {
     if (!selectedTrack) return;
-    checkpoint();
+    if (!continuousEditRef.current) checkpoint();
     setClipTracks((items) => items.map((track) => track.id === selectedTrack.id ? { ...track, ...patch } : track));
   };
 
   const removeClipTrack = (trackId: string) => {
     if (clipTracks.length <= 1) return;
-    checkpoint();
+    if (!continuousEditRef.current) checkpoint();
     const fallback = clipTracks.find((track) => track.id !== trackId);
     setClipTracks((items) => items.filter((track) => track.id !== trackId));
     setPlacements((items) => items.map((placement) => placement.trackId === trackId ? { ...placement, trackId: fallback?.id } : placement));
@@ -633,7 +657,7 @@ export default function Home() {
   const applyBeatGrid = (nextBpm: number, nextOffset: number) => {
     const roundedBpm = Math.round(Math.min(220, Math.max(50, nextBpm)) * 10) / 10;
     const nextBeats = makeBeatGrid(duration, roundedBpm, nextOffset);
-    checkpoint();
+    if (!continuousEditRef.current) checkpoint();
     setBpm(roundedBpm);
     setBeatOffset(nextOffset);
     setBeats(nextBeats);
@@ -677,6 +701,9 @@ export default function Home() {
     const index = sections.indexOf(section);
     const next = [...sections.slice(0, index), left, right, ...sections.slice(index + 1)];
     setSections(next);
+    setPlacements((items) => items.map((placement) => placement.sectionId === section.id && placement.start >= currentTime
+      ? { ...placement, sectionId: right.id }
+      : placement));
     setSelectedSectionId(right.id);
     setStatus(`Split ${section.name} at ${formatTime(currentTime)}. Give each half its own rhythm.`);
   };
@@ -703,12 +730,12 @@ export default function Home() {
 
   const removeAsset = (id: string) => {
     if (analyzing || rendering) return;
-    checkpoint();
     const target = assets.find((asset) => asset.id === id);
     if (target) URL.revokeObjectURL(target.url);
     setAssets((items) => items.filter((asset) => asset.id !== id));
     setPlacements((items) => items.filter((placement) => placement.assetId !== id));
     setAnalysis(null);
+    clearHistory();
     setStatus("Effect removed. Analyze again to refresh its visual profile.");
   };
 
@@ -799,10 +826,7 @@ export default function Home() {
       setSelectedPlacementId(null);
       setSelectedTrackId(restoredTracks[0].id);
       setCurrentTime(0);
-      historyRef.current = [];
-      futureRef.current = [];
-      setCanUndo(false);
-      setCanRedo(false);
+      clearHistory();
       setStatus(`Restored ${stored.placements.length} placements from your saved project.`);
     } catch (error) {
       setStatus(error instanceof Error ? `Restore failed: ${error.message}` : "This browser could not restore the project.");
@@ -813,6 +837,23 @@ export default function Home() {
     if (!mainFile || !placements.length || rendering) {
       setStatus("Analyze the source and build placements before rendering.");
       return;
+    }
+    const outputName = `${mainName.replace(/\.[^/.]+$/, "") || "scenepilot"}-scenepilot.mp4`;
+    let outputStream: RenderOptions["outputStream"];
+    const savePicker = (window as Window & {
+      showSaveFilePicker?: (options: { suggestedName: string; types: Array<{ description: string; accept: Record<string, string[]> }> }) => Promise<FileSystemFileHandle>;
+    }).showSaveFilePicker;
+    if (savePicker) {
+      try {
+        const handle = await savePicker.call(window, { suggestedName: outputName, types: [{ description: "MP4 video", accept: { "video/mp4": [".mp4"] } }] });
+        outputStream = await handle.createWritable() as RenderOptions["outputStream"];
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          setStatus("Render canceled before writing the file.");
+          return;
+        }
+        setStatus("Direct file writing is unavailable; rendering to a browser download instead.");
+      }
     }
     const controller = new AbortController();
     renderAbortRef.current = controller;
@@ -825,18 +866,25 @@ export default function Home() {
         placements,
         tracks: clipTracks,
         duration,
+        frameRate: 30,
+        maxDimension: 1920,
+        outputStream,
         signal: controller.signal,
         onProgress: (progress, message) => {
           setRenderProgress(progress);
           setStatus(message);
         },
       });
-      const anchor = document.createElement("a");
-      anchor.href = URL.createObjectURL(blob);
-      anchor.download = `${mainName.replace(/\.[^/.]+$/, "") || "scenepilot"}-scenepilot.mp4`;
-      anchor.click();
-      window.setTimeout(() => URL.revokeObjectURL(anchor.href), 1000);
-      setStatus(`Rendered ${(blob.size / 1024 / 1024).toFixed(1)} MB MP4 with the original soundtrack.`);
+      if (blob) {
+        const anchor = document.createElement("a");
+        anchor.href = URL.createObjectURL(blob);
+        anchor.download = outputName;
+        anchor.click();
+        window.setTimeout(() => URL.revokeObjectURL(anchor.href), 1000);
+        setStatus(`Rendered ${(blob.size / 1024 / 1024).toFixed(1)} MB MP4 with the original soundtrack.`);
+      } else {
+        setStatus("Rendered a 1080p, 30 fps MP4 directly to disk with the original soundtrack.");
+      }
     } catch (error) {
       if (controller.signal.aborted) setStatus("Render canceled. Your project is still intact.");
       else setStatus(error instanceof Error ? `Render failed: ${error.message}` : "The browser could not render this project.");
@@ -1023,7 +1071,7 @@ export default function Home() {
             <button className="play-button" onClick={togglePlayback} aria-label={playing ? "Pause" : "Play"}>{playing ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}</button>
             <div className="timecode"><strong>{formatTime(currentTime)}</strong><span>/ {formatTime(duration)}</span></div>
             <input className="scrubber" type="range" min="0" max={duration} step="0.01" value={currentTime} onChange={(event) => seek(Number(event.target.value))} />
-            <span className="fps">24 FPS</span>
+            <span className="fps">30 FPS</span>
             <button className="icon-button" onClick={toggleFullscreen} aria-label="Fullscreen preview" title="Fullscreen"><Maximize2 size={16} /></button>
           </div>
 
@@ -1032,7 +1080,7 @@ export default function Home() {
             <div><Activity size={15} /><strong>{bpm}</strong><span>BPM</span></div>
             <div><Layers3 size={15} /><strong>{placements.length}</strong><span>placements</span></div>
             <p>{status}</p>
-            <button className="analyze-button" onClick={analyzing ? () => analysisAbortRef.current?.abort() : () => runAnalysis(false)} disabled={rendering}><WandSparkles size={16} /> {analyzing ? "Cancel analysis" : "Analyze media"}</button>
+            <button className="analyze-button" onClick={analyzing ? () => analysisAbortRef.current?.abort() : () => runAnalysis()} disabled={rendering}><WandSparkles size={16} /> {analyzing ? "Cancel analysis" : "Analyze media"}</button>
           </div>
 
           <div className="beat-grid-panel">
@@ -1043,7 +1091,7 @@ export default function Home() {
               <button onClick={() => applyBeatGrid(bpm + 1, beatOffset)} aria-label="Increase BPM">+</button>
             </div>
             <button className="tap-tempo" onClick={tapTempo}>TAP</button>
-            <label className="beat-offset"><span>OFFSET</span><input type="range" min="-0.5" max="0.5" step="0.005" value={beatOffset} onChange={(event) => applyBeatGrid(bpm, Number(event.target.value))} /><strong>{beatOffset >= 0 ? "+" : ""}{Math.round(beatOffset * 1000)}ms</strong></label>
+            <label className="beat-offset"><span>OFFSET</span><input type="range" {...continuousEditHandlers} min="-0.5" max="0.5" step="0.005" value={beatOffset} onChange={(event) => applyBeatGrid(bpm, Number(event.target.value))} /><strong>{beatOffset >= 0 ? "+" : ""}{Math.round(beatOffset * 1000)}ms</strong></label>
             <button className="icon-button" onClick={resetBeatGrid} disabled={!analysis} aria-label="Restore analyzed beat grid" title="Restore analyzed grid"><RefreshCw size={15} /></button>
           </div>
         </div>
@@ -1083,8 +1131,8 @@ export default function Home() {
               <div className="inspector-title"><span style={{ background: selectedSection.color }} /><div><strong>{selectedSection.name}</strong><small>{formatTime(selectedSection.start)} — {formatTime(selectedSection.end)}</small></div><label className="switch"><input type="checkbox" checked={selectedSection.enabled} onChange={(event) => updateSection({ enabled: event.target.checked })} /><i /></label></div>
               <label className="field"><span>Director pattern</span><select className="director-select" value={selectedSection.pattern} onChange={(event) => updateSection({ pattern: event.target.value as DirectorPattern })}><option value="restrained">Restrained</option><option value="pulse">Pulse</option><option value="build">Build</option><option value="burst">Burst</option><option value="release">Release</option></select></label>
               <div className="field"><span>Rhythm rate</span><div className="rhythm-segments">{(["half", "normal", "double"] as const).map((rate) => <button key={rate} className={selectedSection.rhythm === rate ? "active" : ""} onClick={() => updateSection({ rhythm: rate })}>{rate === "half" ? "½" : rate === "double" ? "2×" : "1×"}</button>)}</div></div>
-              <label className="field"><span>Effect duration</span><div className="value-line"><input type="range" min="0.1" max="4" step="0.05" value={selectedSection.duration} onChange={(event) => updateSection({ duration: Number(event.target.value) })} /><strong>{selectedSection.duration.toFixed(2)}s</strong></div></label>
-              <label className="field"><span>Scale</span><div className="value-line"><input type="range" min="50" max="180" value={selectedSection.scale} onChange={(event) => updateSection({ scale: Number(event.target.value) })} /><strong>{selectedSection.scale}%</strong></div></label>
+              <label className="field"><span>Effect duration</span><div className="value-line"><input type="range" {...continuousEditHandlers} min="0.1" max="4" step="0.05" value={selectedSection.duration} onChange={(event) => updateSection({ duration: Number(event.target.value) })} /><strong>{selectedSection.duration.toFixed(2)}s</strong></div></label>
+              <label className="field"><span>Scale</span><div className="value-line"><input type="range" {...continuousEditHandlers} min="50" max="180" value={selectedSection.scale} onChange={(event) => updateSection({ scale: Number(event.target.value) })} /><strong>{selectedSection.scale}%</strong></div></label>
               <div className="inspector-actions"><button onClick={splitAtPlayhead}><Scissors size={15} /> Split at playhead</button><button className="primary" onClick={rebuildPlacements}><Sparkles size={15} /> Fill timeline</button></div>
             </div>
           )}
@@ -1093,10 +1141,10 @@ export default function Home() {
             <div className="inspector">
               <div className="inspector-title"><span className="clip-swatch" /><div><strong>Placement override</strong><small>{assets.find((asset) => asset.id === selectedPlacement.assetId)?.name}</small></div></div>
               <label className="field"><span>Clip track</span><select className="director-select" value={selectedPlacement.trackId ?? clipTracks[0]?.id} onChange={(event) => { setSelectedTrackId(event.target.value); updatePlacement({ trackId: event.target.value }); }}>{clipTracks.map((track) => <option key={track.id} value={track.id}>{track.name}</option>)}</select></label>
-              <label className="field"><span>Start time</span><div className="value-line"><input type="range" min="0" max={duration} step="0.01" value={selectedPlacement.start} onChange={(event) => updatePlacement({ start: Number(event.target.value) })} /><strong>{formatTime(selectedPlacement.start)}</strong></div></label>
-              <label className="field"><span>Duration</span><div className="value-line"><input type="range" min="0.1" max="6" step="0.05" value={selectedPlacement.duration} onChange={(event) => updatePlacement({ duration: Number(event.target.value) })} /><strong>{selectedPlacement.duration.toFixed(2)}s</strong></div></label>
-              <label className="field"><span>Scale</span><div className="value-line"><input type="range" min="50" max="200" value={selectedPlacement.scale} onChange={(event) => updatePlacement({ scale: Number(event.target.value) })} /><strong>{selectedPlacement.scale}%</strong></div></label>
-              <label className="field"><span>Opacity</span><div className="value-line"><input type="range" min="10" max="100" value={selectedPlacement.opacity} onChange={(event) => updatePlacement({ opacity: Number(event.target.value) })} /><strong>{selectedPlacement.opacity}%</strong></div></label>
+              <label className="field"><span>Start time</span><div className="value-line"><input type="range" {...continuousEditHandlers} min="0" max={duration} step="0.01" value={selectedPlacement.start} onChange={(event) => updatePlacement({ start: Number(event.target.value) })} /><strong>{formatTime(selectedPlacement.start)}</strong></div></label>
+              <label className="field"><span>Duration</span><div className="value-line"><input type="range" {...continuousEditHandlers} min="0.1" max="6" step="0.05" value={selectedPlacement.duration} onChange={(event) => updatePlacement({ duration: Number(event.target.value) })} /><strong>{selectedPlacement.duration.toFixed(2)}s</strong></div></label>
+              <label className="field"><span>Scale</span><div className="value-line"><input type="range" {...continuousEditHandlers} min="50" max="200" value={selectedPlacement.scale} onChange={(event) => updatePlacement({ scale: Number(event.target.value) })} /><strong>{selectedPlacement.scale}%</strong></div></label>
+              <label className="field"><span>Opacity</span><div className="value-line"><input type="range" {...continuousEditHandlers} min="10" max="100" value={selectedPlacement.opacity} onChange={(event) => updatePlacement({ opacity: Number(event.target.value) })} /><strong>{selectedPlacement.opacity}%</strong></div></label>
               <button className="delete-placement" onClick={() => { checkpoint(); setPlacements((items) => items.filter((item) => item.id !== selectedPlacement.id)); setSelectedPlacementId(null); setActivePanel("section"); }}><Trash2 size={15} /> Remove placement</button>
             </div>
           )}
@@ -1104,14 +1152,14 @@ export default function Home() {
           {activePanel === "track" && selectedTrack && (
             <div className="inspector track-inspector">
               <div className="inspector-title"><span style={{ background: selectedTrack.color }} /><div><strong>{selectedTrack.name}</strong><small>{placements.filter((placement) => (placement.trackId ?? clipTracks[0]?.id) === selectedTrack.id).length} clips share this stack</small></div><label className="switch"><input type="checkbox" checked={selectedTrack.enabled} onChange={(event) => updateClipTrack({ enabled: event.target.checked })} /><i /></label></div>
-              <label className="field"><span>Track name</span><input className="track-name-input" value={selectedTrack.name} maxLength={28} onChange={(event) => updateClipTrack({ name: event.target.value.toUpperCase() })} /></label>
+              <label className="field"><span>Track name</span><input className="track-name-input" value={selectedTrack.name} maxLength={28} onFocus={beginContinuousEdit} onBlur={endContinuousEdit} onChange={(event) => updateClipTrack({ name: event.target.value.toUpperCase() })} /></label>
               <label className="field"><span>Blend mode</span><select className="director-select" value={selectedTrack.blend} onChange={(event) => updateClipTrack({ blend: event.target.value as ClipTrack["blend"] })}><option value="screen">Screen</option><option value="overlay">Overlay</option><option value="normal">Normal</option><option value="multiply">Multiply</option></select></label>
-              <label className="field"><span>Track opacity</span><div className="value-line"><input type="range" min="0" max="100" value={selectedTrack.opacity} onChange={(event) => updateClipTrack({ opacity: Number(event.target.value) })} /><strong>{selectedTrack.opacity}%</strong></div></label>
-              <label className="field"><span>Hue shift</span><div className="value-line"><input type="range" min="-180" max="180" value={selectedTrack.hue} onChange={(event) => updateClipTrack({ hue: Number(event.target.value) })} /><strong>{selectedTrack.hue}°</strong></div></label>
-              <label className="field"><span>Color intensity</span><div className="value-line"><input type="range" min="0" max="220" value={selectedTrack.saturation} onChange={(event) => updateClipTrack({ saturation: Number(event.target.value) })} /><strong>{selectedTrack.saturation}%</strong></div></label>
-              <label className="field"><span>Brightness</span><div className="value-line"><input type="range" min="20" max="200" value={selectedTrack.brightness} onChange={(event) => updateClipTrack({ brightness: Number(event.target.value) })} /><strong>{selectedTrack.brightness}%</strong></div></label>
-              <label className="field"><span>Glow</span><div className="value-line"><input type="range" min="0" max="60" value={selectedTrack.glow} onChange={(event) => updateClipTrack({ glow: Number(event.target.value) })} /><strong>{selectedTrack.glow}px</strong></div></label>
-              <div className="fade-fields"><label className="field"><span>Fade in</span><div className="value-line"><input type="range" min="0" max="2" step="0.01" value={selectedTrack.fadeIn} onChange={(event) => updateClipTrack({ fadeIn: Number(event.target.value) })} /><strong>{selectedTrack.fadeIn.toFixed(2)}s</strong></div></label><label className="field"><span>Fade out</span><div className="value-line"><input type="range" min="0" max="2" step="0.01" value={selectedTrack.fadeOut} onChange={(event) => updateClipTrack({ fadeOut: Number(event.target.value) })} /><strong>{selectedTrack.fadeOut.toFixed(2)}s</strong></div></label></div>
+              <label className="field"><span>Track opacity</span><div className="value-line"><input type="range" {...continuousEditHandlers} min="0" max="100" value={selectedTrack.opacity} onChange={(event) => updateClipTrack({ opacity: Number(event.target.value) })} /><strong>{selectedTrack.opacity}%</strong></div></label>
+              <label className="field"><span>Hue shift</span><div className="value-line"><input type="range" {...continuousEditHandlers} min="-180" max="180" value={selectedTrack.hue} onChange={(event) => updateClipTrack({ hue: Number(event.target.value) })} /><strong>{selectedTrack.hue}°</strong></div></label>
+              <label className="field"><span>Color intensity</span><div className="value-line"><input type="range" {...continuousEditHandlers} min="0" max="220" value={selectedTrack.saturation} onChange={(event) => updateClipTrack({ saturation: Number(event.target.value) })} /><strong>{selectedTrack.saturation}%</strong></div></label>
+              <label className="field"><span>Brightness</span><div className="value-line"><input type="range" {...continuousEditHandlers} min="20" max="200" value={selectedTrack.brightness} onChange={(event) => updateClipTrack({ brightness: Number(event.target.value) })} /><strong>{selectedTrack.brightness}%</strong></div></label>
+              <label className="field"><span>Glow</span><div className="value-line"><input type="range" {...continuousEditHandlers} min="0" max="60" value={selectedTrack.glow} onChange={(event) => updateClipTrack({ glow: Number(event.target.value) })} /><strong>{selectedTrack.glow}px</strong></div></label>
+              <div className="fade-fields"><label className="field"><span>Fade in</span><div className="value-line"><input type="range" {...continuousEditHandlers} min="0" max="2" step="0.01" value={selectedTrack.fadeIn} onChange={(event) => updateClipTrack({ fadeIn: Number(event.target.value) })} /><strong>{selectedTrack.fadeIn.toFixed(2)}s</strong></div></label><label className="field"><span>Fade out</span><div className="value-line"><input type="range" {...continuousEditHandlers} min="0" max="2" step="0.01" value={selectedTrack.fadeOut} onChange={(event) => updateClipTrack({ fadeOut: Number(event.target.value) })} /><strong>{selectedTrack.fadeOut.toFixed(2)}s</strong></div></label></div>
               <button className="delete-placement" disabled={clipTracks.length <= 1} onClick={() => removeClipTrack(selectedTrack.id)}><Trash2 size={15} /> Remove clip track</button>
             </div>
           )}

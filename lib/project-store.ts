@@ -29,6 +29,15 @@ function openDatabase() {
 }
 
 export async function saveProject<TSection, TPlacement, TTrack = unknown>(project: StoredProject<TSection, TPlacement, TTrack>) {
+  const mediaBytes = project.mainFile.size + project.assets.reduce((sum, asset) => sum + asset.file.size, 0);
+  if (navigator.storage) {
+    await navigator.storage.persist?.().catch(() => false);
+    const estimate = await navigator.storage.estimate().catch((): StorageEstimate => ({}));
+    const available = (estimate.quota ?? Infinity) - (estimate.usage ?? 0);
+    if (available < mediaBytes * 1.1) {
+      throw new Error(`This project needs about ${Math.ceil(mediaBytes / 1024 / 1024)} MB, but browser storage does not have enough room.`);
+    }
+  }
   const database = await openDatabase();
   try {
     await new Promise<void>((resolve, reject) => {
@@ -36,6 +45,7 @@ export async function saveProject<TSection, TPlacement, TTrack = unknown>(projec
       transaction.objectStore(STORE_NAME).put(project, CURRENT_PROJECT);
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error ?? new Error("Project could not be saved."));
+      transaction.onabort = () => reject(transaction.error ?? new Error("Project storage ran out of space before the media finished saving."));
     });
   } finally {
     database.close();

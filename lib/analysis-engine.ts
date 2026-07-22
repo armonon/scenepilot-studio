@@ -83,6 +83,8 @@ export type DirectorSection = {
   enabled?: boolean;
   rhythm?: RhythmRate;
   pattern?: DirectorPattern;
+  duration?: number;
+  scale?: number;
 };
 
 const SECTION_NAMES = ["OPEN", "VERSE", "BUILD", "PEAK", "BREAK", "FINAL", "OUTRO"];
@@ -190,6 +192,17 @@ async function analyzeAudio(file: File, duration: number, report: (value: Analys
   const frameRate = sampleRate / hopSize;
   const energy = normalize(rawEnergy);
   const onset = normalize(rawOnset);
+  const signals = energy.map((value, index) => ({ time: index / frameRate, energy: value, onset: onset[index] }));
+  const onsetFloor = quantile(rawOnset, 0.5);
+  const onsetPeak = quantile(rawOnset, 0.95);
+  const energyPeak = quantile(rawEnergy, 0.9);
+  const hasRhythmicSignal = rawOnset.length >= 8 && energyPeak > 0.0005 && onsetPeak - onsetFloor > 0.00001;
+  if (!hasRhythmicSignal) {
+    const bpm = 120;
+    const beatDuration = 60 / bpm;
+    const beats = Array.from({ length: Math.floor(duration / beatDuration) + 1 }, (_, index) => index * beatDuration);
+    return { bpm, beats, signals, confidence: 0 };
+  }
   const minBpm = 72;
   const maxBpm = 176;
   let bestLag = Math.round((60 / 120) * frameRate);
@@ -238,9 +251,14 @@ async function analyzeAudio(file: File, duration: number, report: (value: Analys
     return best / frameRate;
   });
 
-  const signals = energy.map((value, index) => ({ time: index / frameRate, energy: value, onset: onset[index] }));
-  const confidence = clamp(bestCorrelation / Math.max(1e-5, quantile(onset, 0.9) ** 2));
+  const correlationValues = [...correlations.values()];
+  const correlationFloor = median(correlationValues);
+  const confidence = clamp((bestCorrelation - correlationFloor) / Math.max(1e-5, quantile(onset, 0.9) ** 2 * 0.35));
   return { bpm: bestBpm, beats: snappedBeats, signals, confidence };
+}
+
+export function hasReliableRhythm(result: Pick<AnalysisResult, "confidence" | "beats" | "signals">) {
+  return result.confidence >= 0.08 && result.beats.length >= 2 && result.signals.some((point) => point.onset >= 0.05);
 }
 
 function frameStats(data: Uint8ClampedArray, previous?: Uint8Array) {
@@ -293,7 +311,7 @@ async function analyzeFootage(file: File, duration: number, report: (value: Anal
   canvas.height = 54;
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) throw new Error("Canvas analysis is unavailable");
-  const interval = Math.max(0.75, duration / 240);
+  const interval = Math.max(0.2, duration / 900);
   const points: VisualPoint[] = [];
   let previousGray: Uint8Array | undefined;
   let previousHistogram: Float32Array | undefined;
@@ -311,19 +329,20 @@ async function analyzeFootage(file: File, duration: number, report: (value: Anal
 
   try {
     const sink = new VideoSampleSink(track);
-    let nextCapture = 0;
-    for await (const sample of sink.samples(0, duration)) {
+    const timestamps = Array.from({ length: Math.max(1, Math.ceil(duration / interval)) }, (_, index) => Math.min(duration - 0.001, index * interval));
+    let frame = 0;
+    for await (const sample of sink.samplesAtTimestamps(timestamps)) {
       checkAborted(signal);
-      if (sample.timestamp + sample.duration >= nextCapture) {
+      const timestamp = timestamps[frame++] ?? 0;
+      if (sample) {
         sample.draw(context, 0, 0, canvas.width, canvas.height);
-        capture(sample.timestamp);
-        nextCapture += interval;
-        if (points.length % 12 === 0) {
-          report({ phase: "footage", progress: Math.min(0.98, sample.timestamp / duration), message: `Inspecting visual sample ${points.length}` });
-          await yieldFrame(signal);
-        }
+        capture(timestamp);
+        sample.close();
       }
-      sample.close();
+      if (frame % 24 === 0 || frame === timestamps.length) {
+        report({ phase: "footage", progress: Math.min(0.98, frame / timestamps.length), message: `Inspecting visual sample ${frame} of ${timestamps.length}` });
+        await yieldFrame(signal);
+      }
     }
     report({ phase: "footage", progress: 1, message: `Inspected ${points.length} visual samples` });
   } catch {
@@ -339,7 +358,7 @@ async function analyzeFootage(file: File, duration: number, report: (value: Anal
     video.src = sourceUrl;
     try {
       if (video.readyState < 2) await waitForMedia(video, "loadeddata", signal);
-      const fallbackInterval = Math.max(1, duration / 160);
+      const fallbackInterval = Math.max(0.35, duration / 600);
       let frame = 0;
       for (let time = 0; time < duration; time += fallbackInterval) {
         checkAborted(signal);
@@ -371,7 +390,7 @@ async function analyzeFootage(file: File, duration: number, report: (value: Anal
   const threshold = center + Math.max(0.045, deviation * 3.2);
   const sceneCuts: SceneCut[] = [];
   for (const point of points) {
-    if (point.cutScore < threshold || point.time - (sceneCuts.at(-1)?.time ?? -10) < 0.8) continue;
+    if (point.cutScore < threshold || point.time - (sceneCuts.at(-1)?.time ?? -10) < 0.3) continue;
     sceneCuts.push({ time: point.time, confidence: clamp((point.cutScore - center) / Math.max(0.08, threshold - center) / 2) });
   }
   return { points, sceneCuts };
@@ -576,12 +595,16 @@ export function buildDirectedPlacements(
       const ranked = [...profiles].sort((a, b) => Math.abs(a.flashiness - desiredFlash) - Math.abs(b.flashiness - desiredFlash));
       const profile = ranked[(selectedIndex + sectionIndex) % ranked.length];
       const assetId = assetIds.includes(profile.assetId) ? profile.assetId : assetIds[(selectedIndex + sectionIndex) % assetIds.length];
-      const idealStart = candidate.beat - profile.peakTime;
-      const sourceStart = Math.max(0, -idealStart);
-      const start = Math.max(0, idealStart);
       const tailMultiplier = pattern === "release" ? 1.35 : pattern === "burst" ? 0.72 : 1;
       const tail = profile.suggestedDuration * tailMultiplier * (0.8 + candidate.signal.energy * 0.55);
+      const maximumDuration = pattern === "release" ? 2 : 1.6;
+      const desiredDuration = clamp(tail + Math.min(profile.peakTime, 0.35), 0.1, maximumDuration);
+      const leadIn = Math.min(profile.peakTime, clamp(desiredDuration * 0.35, 0.04, 0.4));
+      const start = Math.max(section.start, candidate.beat - leadIn, 0);
+      const sourceStart = Math.max(0, profile.peakTime - (candidate.beat - start));
       const availableSource = profile.sourceDuration - sourceStart;
+      const requiredPeakWindow = candidate.beat - start + tail;
+      const requestedDuration = Math.max(section.duration ?? 0, requiredPeakWindow, 0.1);
       const patternScale = pattern === "restrained" ? -4 : pattern === "burst" ? 16 : pattern === "build" ? Math.round((candidate.index / candidates.length) * 14) : 4;
       placements.push({
         id: `directed-${section.id}-${candidate.index}-${assetId}`,
@@ -589,8 +612,8 @@ export function buildDirectedPlacements(
         sectionId: section.id,
         start,
         sourceStart,
-        duration: Math.min(section.end - start, result.duration - start, availableSource, clamp(profile.peakTime - sourceStart + tail, 0.1, pattern === "release" ? 2 : 1.6)),
-        scale: Math.round(104 + candidate.score * (intensity === "maximum" ? 42 : 30) + patternScale),
+        duration: Math.max(0.05, Math.min(section.end - start, result.duration - start, availableSource, requestedDuration, maximumDuration)),
+        scale: section.scale ?? Math.round(104 + candidate.score * (intensity === "maximum" ? 42 : 30) + patternScale),
         opacity: Math.round(clamp(74 + candidate.score * 25 + (pattern === "burst" ? 4 : 0), 50, 100)),
       });
     });
