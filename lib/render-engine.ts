@@ -60,9 +60,10 @@ export async function renderProject({ mainFile, assets, placements, duration, si
     const mainInput = new Input({ formats: ALL_FORMATS, source: new BlobSource(mainFile) });
     inputs.push(mainInput);
     const mainVideoTrack = await mainInput.getPrimaryVideoTrack();
-    if (!mainVideoTrack) throw new Error("The main file has no decodable video track.");
-    const sourceWidth = await mainVideoTrack.getDisplayWidth();
-    const sourceHeight = await mainVideoTrack.getDisplayHeight();
+    const audioTrack = await mainInput.getPrimaryAudioTrack();
+    if (!mainVideoTrack && !audioTrack) throw new Error("The main file has no decodable audio or video track.");
+    const sourceWidth = mainVideoTrack ? await mainVideoTrack.getDisplayWidth() : 1280;
+    const sourceHeight = mainVideoTrack ? await mainVideoTrack.getDisplayHeight() : 720;
     const maxDimension = 1280;
     const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
     const width = Math.max(2, Math.round(sourceWidth * scale / 2) * 2);
@@ -94,7 +95,6 @@ export async function renderProject({ mainFile, assets, placements, duration, si
     output = new Output({ format: new Mp4OutputFormat({ fastStart: "in-memory" }), target });
     const videoSource = new CanvasSource(canvas, { codec: "avc", bitrate: QUALITY_HIGH });
     output.addVideoTrack(videoSource, { frameRate: 24 });
-    const audioTrack = await mainInput.getPrimaryAudioTrack();
     const audioSource = audioTrack ? new AudioSampleSource({ codec: "aac", bitrate: QUALITY_HIGH }) : null;
     if (audioSource) output.addAudioTrack(audioSource);
     await output.start();
@@ -113,11 +113,14 @@ export async function renderProject({ mainFile, assets, placements, duration, si
     const frameDuration = 1 / fps;
     const frameCount = Math.max(1, Math.ceil(duration * fps));
     const timestamps = Array.from({ length: frameCount }, (_, index) => index * frameDuration);
-    const mainSink = new VideoSampleSink(mainVideoTrack);
+    const mainSamples = mainVideoTrack
+      ? new VideoSampleSink(mainVideoTrack).samplesAtTimestamps(timestamps)[Symbol.asyncIterator]()
+      : null;
     let frameIndex = 0;
-    for await (const sample of mainSink.samplesAtTimestamps(timestamps)) {
+    while (frameIndex < frameCount) {
       abortError(signal);
       const time = timestamps[frameIndex];
+      const sample = mainSamples ? (await mainSamples.next()).value ?? null : null;
       context.fillStyle = "#000";
       context.fillRect(0, 0, width, height);
       if (sample) {

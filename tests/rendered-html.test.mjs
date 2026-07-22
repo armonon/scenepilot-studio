@@ -25,6 +25,7 @@ test("server-renders the ScenePilot auto editor", async () => {
   assert.match(html, /Render MP4/);
   assert.match(html, /Restore saved project/);
   assert.match(html, /AUTO DIRECTOR/);
+  assert.match(html, /DROP VIDEO OR SONG/);
 });
 
 test("keeps the analysis, render, and persistence engines connected", async () => {
@@ -43,7 +44,14 @@ test("keeps the analysis, render, and persistence engines connected", async () =
   assert.match(analysis, /pattern === "build"/);
   assert.match(page, /tapTempo/);
   assert.match(page, /beatOffset/);
+  assert.match(page, /accept="video\/\*,audio\/\*"/);
+  assert.match(page, /analysis-dock-track/);
+  assert.match(page, /formatWait\(analysisEta\)/);
+  assert.match(analysis, /new VideoSampleSink\(track\)/);
+  assert.match(analysis, /Audio source ready; building a visual canvas/);
   assert.match(renderEngine, /new Mp4OutputFormat/);
+  assert.match(renderEngine, /if \(!mainVideoTrack && !audioTrack\)/);
+  assert.match(renderEngine, /mainVideoTrack \?/);
   assert.match(renderEngine, /globalCompositeOperation = "screen"/);
   assert.match(projectStore, /indexedDB\.open/);
 });

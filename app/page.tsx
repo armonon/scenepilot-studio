@@ -11,6 +11,7 @@ import {
   Image as ImageIcon,
   Layers3,
   Maximize2,
+  Music2,
   Pause,
   Play,
   Plus,
@@ -89,6 +90,12 @@ function formatTime(seconds: number) {
   return `${String(mins).padStart(2, "0")}:${secs.toFixed(2).padStart(5, "0")}`;
 }
 
+function formatWait(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "estimating";
+  if (seconds < 60) return `${Math.max(1, Math.round(seconds))}s`;
+  return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+}
+
 function makeBeatGrid(duration: number, bpm: number, offset: number) {
   const interval = 60 / Math.max(1, bpm);
   let first = offset;
@@ -165,13 +172,14 @@ function EffectLayer({ asset, placement, currentTime, playing }: { asset: MediaA
 type EditSnapshot = { sections: SectionRule[]; placements: Placement[]; beats: number[]; bpm: number; beatOffset: number; selectedSectionId: string; selectedPlacementId: string | null };
 
 export default function Home() {
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const videoRef = useRef<HTMLMediaElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const mainInputRef = useRef<HTMLInputElement>(null);
   const assetInputRef = useRef<HTMLInputElement>(null);
   const analysisAbortRef = useRef<AbortController | null>(null);
   const renderAbortRef = useRef<AbortController | null>(null);
   const analysisRunRef = useRef(0);
+  const analysisStartedRef = useRef(0);
   const urlsRef = useRef<string[]>([]);
   const historyRef = useRef<EditSnapshot[]>([]);
   const futureRef = useRef<EditSnapshot[]>([]);
@@ -192,12 +200,13 @@ export default function Home() {
   const [selectedPlacementId, setSelectedPlacementId] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [dragActive, setDragActive] = useState(false);
-  const [status, setStatus] = useState("Load a source video to analyze its rhythm");
+  const [status, setStatus] = useState("Load a video or song to analyze its rhythm");
   const [activePanel, setActivePanel] = useState<"section" | "clip">("section");
   const [editorMode, setEditorMode] = useState<"auto" | "pro">("auto");
   const [autoEnergy, setAutoEnergy] = useState<"smooth" | "dynamic" | "maximum">("dynamic");
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState<AnalysisProgress | null>(null);
+  const [analysisElapsed, setAnalysisElapsed] = useState(0);
   const [rendering, setRendering] = useState(false);
   const [renderProgress, setRenderProgress] = useState(0);
   const [canUndo, setCanUndo] = useState(false);
@@ -223,6 +232,10 @@ export default function Home() {
     ? ({ audio: 0, footage: 25, effects: 70, edit: 88 }[analysisProgress.phase]
       + analysisProgress.progress * ({ audio: 25, footage: 45, effects: 18, edit: 12 }[analysisProgress.phase]))
     : 0;
+  const analysisEta = overallAnalysisProgress >= 3
+    ? analysisElapsed * (100 - overallAnalysisProgress) / overallAnalysisProgress
+    : Number.NaN;
+  const mainIsAudio = mainFile?.type.startsWith("audio/") ?? false;
   const directorArc = sections.map((section) => section.pattern.toUpperCase()).join("  /  ");
   useEffect(() => {
     urlsRef.current = [mainUrl, ...assets.map((asset) => asset.url)].filter(Boolean);
@@ -233,6 +246,15 @@ export default function Home() {
     renderAbortRef.current?.abort();
     urlsRef.current.forEach((url) => URL.revokeObjectURL(url));
   }, []);
+
+  useEffect(() => {
+    if (!analyzing) return;
+    analysisStartedRef.current = window.performance.now();
+    const timer = window.setInterval(() => {
+      setAnalysisElapsed((window.performance.now() - analysisStartedRef.current) / 1000);
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [analyzing]);
 
   const snapshot = (): EditSnapshot => ({ sections, placements, beats, bpm, beatOffset, selectedSectionId, selectedPlacementId });
   const checkpoint = () => {
@@ -280,12 +302,12 @@ export default function Home() {
     };
   }, [mainUrl, editorMode]);
 
-  const loadMainVideo = (file?: File) => {
-    if (!file || !file.type.startsWith("video/") || analyzing || rendering) return;
+  const loadMainMedia = (file?: File) => {
+    if (!file || (!file.type.startsWith("video/") && !file.type.startsWith("audio/")) || analyzing || rendering) return;
     analysisAbortRef.current?.abort();
     if (mainUrl) URL.revokeObjectURL(mainUrl);
     const url = URL.createObjectURL(file);
-    const probe = document.createElement("video");
+    const probe = document.createElement(file.type.startsWith("audio/") ? "audio" : "video");
     probe.preload = "metadata";
     probe.src = url;
     probe.onloadedmetadata = () => {
@@ -296,7 +318,9 @@ export default function Home() {
       setBeats(Array.from({ length: Math.ceil(nextDuration * 2) }, (_, index) => index * 0.5));
       setPlacements([]);
       setAnalysis(null);
-      setStatus("Source ready. The engine will inspect its audio and visual frames.");
+      setStatus(file.type.startsWith("audio/")
+        ? "Song ready. The engine will map its beats, energy, and musical sections."
+        : "Source ready. The engine will inspect its audio and visual frames.");
     };
     setMainFile(file);
     setMainUrl(url);
@@ -334,7 +358,7 @@ export default function Home() {
 
   const runAnalysis = async (auto = false) => {
     if (!mainFile) {
-      setStatus("Add the main video first so ScenePilot can inspect it.");
+      setStatus("Add a source video or song first so ScenePilot can inspect it.");
       mainInputRef.current?.click();
       return;
     }
@@ -347,6 +371,7 @@ export default function Home() {
     const controller = new AbortController();
     analysisAbortRef.current = controller;
     const run = ++analysisRunRef.current;
+    setAnalysisElapsed(0);
     setAnalyzing(true);
     setStatus("Opening the real analysis engine...");
     try {
@@ -407,7 +432,7 @@ export default function Home() {
 
   const runAutoCut = async () => {
     if (!mainFile) {
-      setStatus("Start with your main music video.");
+      setStatus("Start with your main video or song.");
       mainInputRef.current?.click();
       return;
     }
@@ -565,7 +590,7 @@ export default function Home() {
 
   const saveCurrentProject = async () => {
     if (!mainFile) {
-      setStatus("Add a main video before saving this project.");
+      setStatus("Add a source video or song before saving this project.");
       return;
     }
     try {
@@ -675,7 +700,7 @@ export default function Home() {
   const dropMain = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDragActive(false);
-    loadMainVideo(event.dataTransfer.files[0]);
+    loadMainMedia(event.dataTransfer.files[0]);
   };
 
   return (
@@ -699,6 +724,22 @@ export default function Home() {
         </div>
       </header>
 
+      {analyzing && analysisProgress && (
+        <section className="analysis-dock" aria-live="polite">
+          <div className="analysis-dock-copy">
+            <Activity size={15} />
+            <span><strong>{Math.round(overallAnalysisProgress)}%</strong>{analysisProgress.message}</span>
+          </div>
+          <div className="analysis-dock-track"><i style={{ width: `${overallAnalysisProgress}%` }} /></div>
+          <div className="analysis-dock-meta">
+            <span>{analysisProgress.phase === "footage" ? "visuals" : analysisProgress.phase}</span>
+            <span>{formatWait(analysisElapsed)} elapsed</span>
+            <span>{formatWait(analysisEta)} left</span>
+            <button onClick={() => analysisAbortRef.current?.abort()}>Cancel</button>
+          </div>
+        </section>
+      )}
+
       {editorMode === "auto" ? (
         <section className="auto-screen">
           <div className="auto-heading">
@@ -715,12 +756,17 @@ export default function Home() {
               onDragLeave={() => setDragActive(false)}
               onDrop={dropMain}
             >
-              {mainUrl ? (
+              {mainUrl ? mainIsAudio ? (
+                <>
+                  <div className="audio-source-canvas"><Music2 size={34} /><strong>{mainName}</strong><div>{energyBars.slice(0, 54).map((height, index) => <i key={index} style={{ height: `${Math.max(12, height)}%` }} />)}</div></div>
+                  <audio ref={videoRef} src={mainUrl} preload="metadata" />
+                </>
+              ) : (
                 <video ref={videoRef} src={mainUrl} playsInline preload="metadata" />
               ) : (
                 <button className="auto-preview-empty" onClick={() => mainInputRef.current?.click()}>
                   <Film size={42} />
-                  <strong>DROP MAIN VIDEO</strong>
+                  <strong>DROP VIDEO OR SONG</strong>
                   <span>or choose a file</span>
                 </button>
               )}
@@ -735,8 +781,8 @@ export default function Home() {
             <div className="auto-controls">
               <div className="auto-media-row">
                 <button className={mainUrl ? "loaded" : ""} disabled={analyzing || rendering} onClick={() => mainInputRef.current?.click()}>
-                  <div>{mainUrl ? <Video size={20} /> : <Upload size={20} />}</div>
-                  <span><small>01 / SOURCE</small><strong>{mainUrl ? mainName : "Main video"}</strong></span>
+                  <div>{mainUrl ? mainIsAudio ? <Music2 size={20} /> : <Video size={20} /> : <Upload size={20} />}</div>
+                  <span><small>01 / SOURCE</small><strong>{mainUrl ? mainName : "Video or song"}</strong></span>
                   {mainUrl && <i>READY</i>}
                 </button>
                 <button className={assets.length ? "loaded" : ""} disabled={analyzing || rendering} onClick={() => assetInputRef.current?.click()}>
@@ -745,7 +791,7 @@ export default function Home() {
                   {assets.length > 0 && <i>READY</i>}
                 </button>
               </div>
-              <input ref={mainInputRef} disabled={analyzing || rendering} hidden type="file" accept="video/*" onChange={(event) => loadMainVideo(event.target.files?.[0])} />
+              <input ref={mainInputRef} disabled={analyzing || rendering} hidden type="file" accept="video/*,audio/*" onChange={(event) => loadMainMedia(event.target.files?.[0])} />
               <input ref={assetInputRef} disabled={analyzing || rendering} hidden type="file" multiple accept="image/*,video/*" onChange={(event) => event.target.files && addAssets(event.target.files)} />
 
               <div className="energy-control">
@@ -761,18 +807,6 @@ export default function Home() {
                 <div><small>04 / AUTO DIRECTOR</small><strong>{analysis ? `${sections.length} musical sections shaped` : "Builds an intentional section arc"}</strong></div>
                 <span>{analysis ? directorArc : "RESTRAINT  /  PULSE  /  BUILD  /  BURST  /  RELEASE"}</span>
               </div>
-
-              {analyzing && analysisProgress && (
-                <div className="analysis-progress" aria-live="polite">
-                  <div className="analysis-phase">
-                    {(["audio", "footage", "effects", "edit"] as const).map((phase) => (
-                      <span key={phase} className={phase === analysisProgress.phase ? "active" : ""}>{phase}</span>
-                    ))}
-                  </div>
-                  <div className="analysis-progress-track"><i style={{ width: `${overallAnalysisProgress}%` }} /></div>
-                  <p>{analysisProgress.message}</p>
-                </div>
-              )}
 
               <button className="auto-cut-button" onClick={analyzing ? () => analysisAbortRef.current?.abort() : runAutoCut} disabled={rendering}>
                 {analyzing ? <Activity size={19} /> : <WandSparkles size={19} />}
@@ -803,14 +837,19 @@ export default function Home() {
             onDragLeave={() => setDragActive(false)}
             onDrop={dropMain}
           >
-            {mainUrl ? (
+            {mainUrl ? mainIsAudio ? (
+              <>
+                <div className="audio-source-canvas"><Music2 size={34} /><strong>{mainName}</strong><div>{energyBars.slice(0, 54).map((height, index) => <i key={index} style={{ height: `${Math.max(12, height)}%` }} />)}</div></div>
+                <audio ref={videoRef} src={mainUrl} preload="metadata" />
+              </>
+            ) : (
               <video ref={videoRef} src={mainUrl} playsInline preload="metadata" />
             ) : (
               <div className="empty-monitor">
                 <div className="empty-reel"><Film size={36} /></div>
-                <p>DROP YOUR MAIN VIDEO</p>
-                <span>MP4, MOV, WebM · media never leaves this browser</span>
-                <button onClick={() => mainInputRef.current?.click()}><Upload size={16} /> Choose video</button>
+                <p>DROP YOUR VIDEO OR SONG</p>
+                <span>Video or audio · media never leaves this browser</span>
+                <button onClick={() => mainInputRef.current?.click()}><Upload size={16} /> Choose source</button>
               </div>
             )}
             {activePlacements.map((placement) => {
@@ -818,7 +857,7 @@ export default function Home() {
               return asset ? <EffectLayer key={placement.id} asset={asset} placement={placement} currentTime={currentTime} playing={playing} /> : null;
             })}
             <div className="monitor-badge"><Activity size={13} /> {mainUrl ? "LIVE PREVIEW" : "LOCAL ENGINE READY"}</div>
-            <input ref={mainInputRef} hidden type="file" accept="video/*" onChange={(event) => loadMainVideo(event.target.files?.[0])} />
+            <input ref={mainInputRef} hidden type="file" accept="video/*,audio/*" onChange={(event) => loadMainMedia(event.target.files?.[0])} />
           </div>
 
           <div className="transport">
@@ -928,7 +967,7 @@ export default function Home() {
               </div>
             </div>
             <div className="video-lane">
-              <div className="track-label"><Film size={15} /><span>MAIN VIDEO</span></div>
+              <div className="track-label">{mainIsAudio ? <Music2 size={15} /> : <Film size={15} />}<span>{mainIsAudio ? "SOURCE AUDIO" : "MAIN VIDEO"}</span></div>
               <div className="track-content"><div className="main-clip"><div className="clip-stripes" /><strong>{mainName}</strong><span>{formatTime(duration)}</span></div></div>
             </div>
             <div className="effects-lane">

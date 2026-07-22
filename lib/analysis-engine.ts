@@ -1,4 +1,4 @@
-import { ALL_FORMATS, AudioBufferSink, BlobSource, Input } from "mediabunny";
+import { ALL_FORMATS, AudioBufferSink, BlobSource, Input, VideoSampleSink } from "mediabunny";
 
 export type AnalysisProgress = {
   phase: "audio" | "footage" | "effects" | "edit";
@@ -134,6 +134,7 @@ async function analyzeAudio(file: File, duration: number, report: (value: Analys
   let previousHigh = 0;
   let sampleRate = 48000;
   let carry = new Float32Array(0);
+  let lastProgressTime = -Infinity;
   const processFrame = (samples: Float32Array, start: number, end: number) => {
     let sum = 0;
     let high = 0;
@@ -156,7 +157,7 @@ async function analyzeAudio(file: File, duration: number, report: (value: Analys
   const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
   try {
     const track = await input.getPrimaryAudioTrack();
-    if (!track) throw new Error("The main video has no decodable soundtrack.");
+    if (!track) throw new Error("The source has no decodable soundtrack.");
     const sink = new AudioBufferSink(track);
     for await (const wrapped of sink.buffers(0, duration)) {
       checkAborted(signal);
@@ -174,8 +175,12 @@ async function analyzeAudio(file: File, duration: number, report: (value: Analys
         consumed = start + hopSize;
       }
       carry = combined.slice(consumed);
-      report({ phase: "audio", progress: Math.min(0.95, (wrapped.timestamp + wrapped.duration) / duration), message: "Measuring transients and musical energy" });
-      await yieldFrame(signal);
+      const decodedThrough = wrapped.timestamp + wrapped.duration;
+      if (decodedThrough - lastProgressTime >= 2 || decodedThrough >= duration - 0.05) {
+        report({ phase: "audio", progress: Math.min(0.98, decodedThrough / duration), message: "Measuring transients and musical energy" });
+        lastProgressTime = decodedThrough;
+        await yieldFrame(signal);
+      }
     }
     if (carry.length) processFrame(carry, 0, carry.length);
   } finally {
@@ -238,31 +243,6 @@ async function analyzeAudio(file: File, duration: number, report: (value: Analys
   return { bpm: bestBpm, beats: snappedBeats, signals, confidence };
 }
 
-function waitForMedia(target: HTMLMediaElement, event: "loadeddata" | "seeked", signal?: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    const cleanup = () => {
-      window.clearTimeout(timer);
-      target.removeEventListener(event, done);
-      signal?.removeEventListener("abort", aborted);
-    };
-    const done = () => {
-      cleanup();
-      resolve();
-    };
-    const aborted = () => {
-      cleanup();
-      reject(signal?.reason ?? new DOMException("Analysis canceled", "AbortError"));
-    };
-    const timer = window.setTimeout(() => {
-      cleanup();
-      reject(new Error(`Media ${event} timed out`));
-    }, 10000);
-    target.addEventListener(event, done);
-    signal?.addEventListener("abort", aborted, { once: true });
-    if (signal?.aborted) aborted();
-  });
-}
-
 function frameStats(data: Uint8ClampedArray, previous?: Uint8Array) {
   const gray = new Uint8Array(data.length / 4);
   const histogram = new Float32Array(16);
@@ -284,29 +264,40 @@ function frameStats(data: Uint8ClampedArray, previous?: Uint8Array) {
   };
 }
 
-async function analyzeFootage(url: string, duration: number, report: (value: AnalysisProgress) => void, signal?: AbortSignal) {
-  const video = document.createElement("video");
-  video.muted = true;
-  video.preload = "auto";
-  video.src = url;
-  if (video.readyState < 2) await waitForMedia(video, "loadeddata", signal);
+function waitForMedia(target: HTMLMediaElement, event: "loadeddata" | "seeked", signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      target.removeEventListener(event, done);
+      signal?.removeEventListener("abort", aborted);
+    };
+    const done = () => { cleanup(); resolve(); };
+    const aborted = () => { cleanup(); reject(signal?.reason ?? new DOMException("Analysis canceled", "AbortError")); };
+    const timer = window.setTimeout(() => { cleanup(); reject(new Error(`Media ${event} timed out`)); }, 10000);
+    target.addEventListener(event, done);
+    signal?.addEventListener("abort", aborted, { once: true });
+    if (signal?.aborted) aborted();
+  });
+}
+
+async function analyzeFootage(file: File, duration: number, report: (value: AnalysisProgress) => void, signal?: AbortSignal) {
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+  const track = await input.getPrimaryVideoTrack();
+  if (!track) {
+    input.dispose();
+    report({ phase: "footage", progress: 1, message: "Audio source ready; building a visual canvas" });
+    return { points: [], sceneCuts: [] };
+  }
   const canvas = document.createElement("canvas");
   canvas.width = 96;
   canvas.height = 54;
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) throw new Error("Canvas analysis is unavailable");
-  const interval = Math.max(0.35, duration / 420);
+  const interval = Math.max(0.75, duration / 240);
   const points: VisualPoint[] = [];
   let previousGray: Uint8Array | undefined;
   let previousHistogram: Float32Array | undefined;
-
-  for (let time = 0, frame = 0; time < duration; time += interval, frame++) {
-    checkAborted(signal);
-    if (Math.abs(video.currentTime - time) > 0.01) {
-      video.currentTime = Math.min(time, Math.max(0, duration - 0.05));
-      await waitForMedia(video, "seeked", signal);
-    }
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const capture = (time: number) => {
     const stats = frameStats(context.getImageData(0, 0, canvas.width, canvas.height).data, previousGray);
     let histogramDistance = 0;
     if (previousHistogram) {
@@ -316,13 +307,61 @@ async function analyzeFootage(url: string, duration: number, report: (value: Ana
     points.push({ time, brightness: stats.brightness, motion: stats.difference, cutScore: histogramDistance * 0.62 + stats.difference * 0.38 });
     previousGray = stats.gray;
     previousHistogram = stats.histogram;
-    if (frame % 12 === 0) {
-      report({ phase: "footage", progress: Math.min(0.98, time / duration), message: `Inspecting frame ${frame + 1}` });
-      await yieldFrame(signal);
+  };
+
+  try {
+    const sink = new VideoSampleSink(track);
+    let nextCapture = 0;
+    for await (const sample of sink.samples(0, duration)) {
+      checkAborted(signal);
+      if (sample.timestamp + sample.duration >= nextCapture) {
+        sample.draw(context, 0, 0, canvas.width, canvas.height);
+        capture(sample.timestamp);
+        nextCapture += interval;
+        if (points.length % 12 === 0) {
+          report({ phase: "footage", progress: Math.min(0.98, sample.timestamp / duration), message: `Inspecting visual sample ${points.length}` });
+          await yieldFrame(signal);
+        }
+      }
+      sample.close();
     }
+    report({ phase: "footage", progress: 1, message: `Inspected ${points.length} visual samples` });
+  } catch {
+    checkAborted(signal);
+    points.length = 0;
+    previousGray = undefined;
+    previousHistogram = undefined;
+    report({ phase: "footage", progress: 0, message: "Using compatibility scan for this video" });
+    const video = document.createElement("video");
+    video.muted = true;
+    video.preload = "auto";
+    const sourceUrl = URL.createObjectURL(file);
+    video.src = sourceUrl;
+    try {
+      if (video.readyState < 2) await waitForMedia(video, "loadeddata", signal);
+      const fallbackInterval = Math.max(1, duration / 160);
+      let frame = 0;
+      for (let time = 0; time < duration; time += fallbackInterval) {
+        checkAborted(signal);
+        video.currentTime = Math.min(time, Math.max(0, duration - 0.05));
+        await waitForMedia(video, "seeked", signal);
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        capture(time);
+        frame++;
+        if (frame % 8 === 0) {
+          report({ phase: "footage", progress: Math.min(0.98, time / duration), message: `Compatibility sample ${frame}` });
+          await yieldFrame(signal);
+        }
+      }
+      report({ phase: "footage", progress: 1, message: `Inspected ${points.length} visual samples` });
+    } finally {
+      video.removeAttribute("src");
+      video.load();
+      URL.revokeObjectURL(sourceUrl);
+    }
+  } finally {
+    input.dispose();
   }
-  video.removeAttribute("src");
-  video.load();
   const scores = points.slice(1).map((point) => point.cutScore);
   const center = median(scores);
   const deviation = median(scores.map((value) => Math.abs(value - center)));
@@ -346,20 +385,21 @@ async function analyzeEffect(asset: AnalysisAsset, signal?: AbortSignal) {
   let sourceDuration = Infinity;
 
   if (asset.kind === "image") {
-    const image = new Image();
-    image.src = asset.url;
-    await new Promise<void>((resolve, reject) => { image.onload = () => resolve(); image.onerror = () => reject(new Error("Image analysis failed")); });
-    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const bitmap = await createImageBitmap(asset.file);
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
     brightness.push(frameStats(context.getImageData(0, 0, canvas.width, canvas.height).data).brightness);
     times.push(0);
   } else {
     const video = document.createElement("video");
     video.muted = true;
     video.preload = "auto";
-    video.src = asset.url;
+    const sourceUrl = asset.url || URL.createObjectURL(asset.file);
+    video.src = sourceUrl;
+    const temporaryUrl = !asset.url;
     if (video.readyState < 2) await waitForMedia(video, "loadeddata", signal);
     sourceDuration = video.duration || 1;
-    const inspectDuration = Math.min(8, video.duration || 1);
+    const inspectDuration = Math.min(8, sourceDuration);
     for (let index = 0; index < 20; index++) {
       checkAborted(signal);
       const time = (inspectDuration * index) / 20;
@@ -374,6 +414,7 @@ async function analyzeEffect(asset: AnalysisAsset, signal?: AbortSignal) {
     }
     video.removeAttribute("src");
     video.load();
+    if (temporaryUrl) URL.revokeObjectURL(sourceUrl);
   }
 
   let peakIndex = 0;
@@ -426,7 +467,7 @@ function detectSections(duration: number, signals: SignalPoint[], scenes: SceneC
 
 export async function analyzeProject(
   file: File,
-  url: string,
+  _url: string,
   duration: number,
   assets: AnalysisAsset[],
   report: (value: AnalysisProgress) => void,
@@ -435,11 +476,12 @@ export async function analyzeProject(
   report({ phase: "audio", progress: 0, message: "Opening the soundtrack" });
   const audio = await analyzeAudio(file, duration, report, signal);
   report({ phase: "footage", progress: 0, message: "Reading visual frames" });
-  const footage = await analyzeFootage(url, duration, report, signal);
+  const footage = await analyzeFootage(file, duration, report, signal);
   const effects: EffectProfile[] = [];
   for (let index = 0; index < assets.length; index++) {
     report({ phase: "effects", progress: index / Math.max(1, assets.length), message: `Reading effect ${index + 1} of ${assets.length}` });
     effects.push(await analyzeEffect(assets[index], signal));
+    report({ phase: "effects", progress: (index + 1) / Math.max(1, assets.length), message: `Profiled effect ${index + 1} of ${assets.length}` });
     await yieldFrame(signal);
   }
   report({ phase: "edit", progress: 0.6, message: "Finding musical sections" });
