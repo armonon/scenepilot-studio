@@ -31,6 +31,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--cyan); outl
 .project-title > span:nth-child(2) { max-width: 36vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 0 3px #c8ef4b1f; }
 .top-actions { display: flex; justify-content: flex-end; align-items: center; gap: 7px; }
+.top-actions button:disabled, .auto-media-row button:disabled, .add-button:disabled { opacity: .4; cursor: not-allowed; }
 .icon-button { width: 32px; height: 32px; border: 0; background: transparent; display: grid; place-items: center; border-radius: 4px; cursor: pointer; color: #a9b2af; }
 .icon-button:hover { background: #222a28; color: white; }
 .export-button, .add-button, .analyze-button { height: 34px; border: 1px solid #6ee6da; background: var(--cyan); color: #061411; padding: 0 13px; border-radius: 4px; font-weight: 700; font-size: 12px; display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
@@ -81,6 +82,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--cyan); outl
 .analysis-progress-track { height: 3px; overflow: hidden; background: #252e2b; }
 .analysis-progress-track i { display: block; height: 100%; background: var(--cyan); transition: width 180ms linear; }
 .analysis-progress p { margin: 8px 0 0; color: #9ca6a2; font-size: 9px; }
+.render-progress { min-height: 34px; position: relative; overflow: hidden; border: 1px solid #33403c; background: #0b100f; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; }
+.render-progress > i { position: absolute; inset: 0 auto 0 0; background: #34d6c71f; border-right: 1px solid var(--cyan); transition: width 180ms linear; }
+.render-progress span, .render-progress button { position: relative; z-index: 1; font: 9px var(--font-geist-mono); }
+.render-progress button { border: 0; background: transparent; color: var(--coral); cursor: pointer; }
 .auto-cut-button { min-height: 58px; border: 1px solid #ff8b81; background: var(--coral); color: #1b0807; display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 12px; font-weight: 900; cursor: pointer; }
 .auto-cut-button:hover { background: #ff7b70; }
 .auto-cut-button:disabled { opacity: .65; cursor: progress; }

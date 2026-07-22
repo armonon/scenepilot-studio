@@ -1,3 +1,5 @@
+import { ALL_FORMATS, AudioBufferSink, BlobSource, Input } from "mediabunny";
+
 export type AnalysisProgress = {
   phase: "audio" | "footage" | "effects" | "edit";
   progress: number;
@@ -32,6 +34,7 @@ export type SceneCut = {
 export type EffectProfile = {
   assetId: string;
   peakTime: number;
+  sourceDuration: number;
   brightness: number;
   flashiness: number;
   suggestedDuration: number;
@@ -63,6 +66,7 @@ export type SmartPlacement = {
   assetId: string;
   sectionId: string;
   start: number;
+  sourceStart: number;
   duration: number;
   scale: number;
   opacity: number;
@@ -97,32 +101,32 @@ function nearestSignal(signals: SignalPoint[], time: number) {
   return signals[Math.min(signals.length - 1, Math.max(0, Math.round(time / step)))];
 }
 
-async function yieldFrame() {
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+function checkAborted(signal?: AbortSignal) {
+  signal?.throwIfAborted();
 }
 
-async function analyzeAudio(file: File, duration: number, report: (value: AnalysisProgress) => void) {
-  const context = new AudioContext();
-  const buffer = await context.decodeAudioData(await file.arrayBuffer());
+async function yieldFrame(signal?: AbortSignal) {
+  checkAborted(signal);
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  checkAborted(signal);
+}
+
+async function analyzeAudio(file: File, duration: number, report: (value: AnalysisProgress) => void, signal?: AbortSignal) {
+  checkAborted(signal);
   const frameSize = 2048;
   const hopSize = 1024;
-  const sampleRate = buffer.sampleRate;
-  const frameRate = sampleRate / hopSize;
-  const channels = Array.from({ length: buffer.numberOfChannels }, (_, index) => buffer.getChannelData(index));
   const rawEnergy: number[] = [];
   const rawOnset: number[] = [];
   let previousEnergy = 0;
   let previousHigh = 0;
-
-  for (let start = 0, frame = 0; start < buffer.length; start += hopSize, frame++) {
+  let sampleRate = 48000;
+  let carry = new Float32Array(0);
+  const processFrame = (samples: Float32Array, start: number, end: number) => {
     let sum = 0;
     let high = 0;
     let previous = 0;
-    const end = Math.min(buffer.length, start + frameSize);
     for (let index = start; index < end; index += 2) {
-      let sample = 0;
-      for (const channel of channels) sample += channel[index] || 0;
-      sample /= channels.length;
+      const sample = samples[index] || 0;
       sum += sample * sample;
       const delta = sample - previous;
       high += delta * delta;
@@ -135,21 +139,48 @@ async function analyzeAudio(file: File, duration: number, report: (value: Analys
     rawOnset.push(Math.max(0, energy - previousEnergy) * 0.55 + Math.max(0, highEnergy - previousHigh) * 0.45);
     previousEnergy = previousEnergy * 0.72 + energy * 0.28;
     previousHigh = previousHigh * 0.72 + highEnergy * 0.28;
-    if (frame % 500 === 0) {
-      report({ phase: "audio", progress: Math.min(0.95, start / buffer.length), message: "Measuring transients and musical energy" });
-      await yieldFrame();
+  };
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+  try {
+    const track = await input.getPrimaryAudioTrack();
+    if (!track) throw new Error("The main video has no decodable soundtrack.");
+    const sink = new AudioBufferSink(track);
+    for await (const wrapped of sink.buffers(0, duration)) {
+      checkAborted(signal);
+      const buffer = wrapped.buffer;
+      sampleRate = buffer.sampleRate;
+      const channels = Array.from({ length: buffer.numberOfChannels }, (_, index) => buffer.getChannelData(index));
+      const mono = new Float32Array(buffer.length);
+      for (const channel of channels) for (let index = 0; index < mono.length; index++) mono[index] += (channel[index] || 0) / channels.length;
+      const combined = new Float32Array(carry.length + mono.length);
+      combined.set(carry);
+      combined.set(mono, carry.length);
+      let consumed = 0;
+      for (let start = 0; start + frameSize <= combined.length; start += hopSize) {
+        processFrame(combined, start, start + frameSize);
+        consumed = start + hopSize;
+      }
+      carry = combined.slice(consumed);
+      report({ phase: "audio", progress: Math.min(0.95, (wrapped.timestamp + wrapped.duration) / duration), message: "Measuring transients and musical energy" });
+      await yieldFrame(signal);
     }
+    if (carry.length) processFrame(carry, 0, carry.length);
+  } finally {
+    input.dispose();
   }
 
+  const frameRate = sampleRate / hopSize;
   const energy = normalize(rawEnergy);
   const onset = normalize(rawOnset);
   const minBpm = 72;
   const maxBpm = 176;
-  let bestBpm = 120;
+  let bestLag = Math.round((60 / 120) * frameRate);
   let bestCorrelation = -Infinity;
   const noveltyMean = onset.reduce((sum, value) => sum + value, 0) / Math.max(1, onset.length);
-  for (let bpm = minBpm; bpm <= maxBpm; bpm++) {
-    const lag = Math.round((60 / bpm) * frameRate);
+  const correlations = new Map<number, number>();
+  const minimumLag = Math.floor((60 / maxBpm) * frameRate);
+  const maximumLag = Math.ceil((60 / minBpm) * frameRate);
+  for (let lag = minimumLag; lag <= maximumLag; lag++) {
     let correlation = 0;
     let weight = 0;
     for (let index = lag; index < onset.length; index += 2) {
@@ -157,11 +188,17 @@ async function analyzeAudio(file: File, duration: number, report: (value: Analys
       weight++;
     }
     correlation /= Math.max(1, weight);
+    correlations.set(lag, correlation);
     if (correlation > bestCorrelation) {
       bestCorrelation = correlation;
-      bestBpm = bpm;
+      bestLag = lag;
     }
   }
+  const left = correlations.get(bestLag - 1) ?? bestCorrelation;
+  const right = correlations.get(bestLag + 1) ?? bestCorrelation;
+  const curvature = left - 2 * bestCorrelation + right;
+  const offset = Math.abs(curvature) > 1e-9 ? clamp(0.5 * (left - right) / curvature, -0.5, 0.5) : 0;
+  const bestBpm = Math.round(clamp(60 * frameRate / (bestLag + offset), minBpm, maxBpm));
 
   const beatDuration = 60 / bestBpm;
   const searchFrames = Math.min(onset.length, Math.round(frameRate * 12));
@@ -184,19 +221,32 @@ async function analyzeAudio(file: File, duration: number, report: (value: Analys
   });
 
   const signals = energy.map((value, index) => ({ time: index / frameRate, energy: value, onset: onset[index] }));
-  await context.close();
   const confidence = clamp(bestCorrelation / Math.max(1e-5, quantile(onset, 0.9) ** 2));
   return { bpm: bestBpm, beats: snappedBeats, signals, confidence };
 }
 
-function waitForMedia(target: HTMLMediaElement, event: "loadeddata" | "seeked") {
+function waitForMedia(target: HTMLMediaElement, event: "loadeddata" | "seeked", signal?: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
-    const timer = window.setTimeout(() => reject(new Error(`Media ${event} timed out`)), 10000);
-    const done = () => {
+    const cleanup = () => {
       window.clearTimeout(timer);
+      target.removeEventListener(event, done);
+      signal?.removeEventListener("abort", aborted);
+    };
+    const done = () => {
+      cleanup();
       resolve();
     };
-    target.addEventListener(event, done, { once: true });
+    const aborted = () => {
+      cleanup();
+      reject(signal?.reason ?? new DOMException("Analysis canceled", "AbortError"));
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error(`Media ${event} timed out`));
+    }, 10000);
+    target.addEventListener(event, done);
+    signal?.addEventListener("abort", aborted, { once: true });
+    if (signal?.aborted) aborted();
   });
 }
 
@@ -221,12 +271,12 @@ function frameStats(data: Uint8ClampedArray, previous?: Uint8Array) {
   };
 }
 
-async function analyzeFootage(url: string, duration: number, report: (value: AnalysisProgress) => void) {
+async function analyzeFootage(url: string, duration: number, report: (value: AnalysisProgress) => void, signal?: AbortSignal) {
   const video = document.createElement("video");
   video.muted = true;
   video.preload = "auto";
   video.src = url;
-  if (video.readyState < 2) await waitForMedia(video, "loadeddata");
+  if (video.readyState < 2) await waitForMedia(video, "loadeddata", signal);
   const canvas = document.createElement("canvas");
   canvas.width = 96;
   canvas.height = 54;
@@ -238,9 +288,10 @@ async function analyzeFootage(url: string, duration: number, report: (value: Ana
   let previousHistogram: Float32Array | undefined;
 
   for (let time = 0, frame = 0; time < duration; time += interval, frame++) {
+    checkAborted(signal);
     if (Math.abs(video.currentTime - time) > 0.01) {
       video.currentTime = Math.min(time, Math.max(0, duration - 0.05));
-      await waitForMedia(video, "seeked");
+      await waitForMedia(video, "seeked", signal);
     }
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     const stats = frameStats(context.getImageData(0, 0, canvas.width, canvas.height).data, previousGray);
@@ -254,7 +305,7 @@ async function analyzeFootage(url: string, duration: number, report: (value: Ana
     previousHistogram = stats.histogram;
     if (frame % 12 === 0) {
       report({ phase: "footage", progress: Math.min(0.98, time / duration), message: `Inspecting frame ${frame + 1}` });
-      await yieldFrame();
+      await yieldFrame(signal);
     }
   }
   video.removeAttribute("src");
@@ -271,7 +322,7 @@ async function analyzeFootage(url: string, duration: number, report: (value: Ana
   return { points, sceneCuts };
 }
 
-async function analyzeEffect(asset: AnalysisAsset) {
+async function analyzeEffect(asset: AnalysisAsset, signal?: AbortSignal) {
   const canvas = document.createElement("canvas");
   canvas.width = 96;
   canvas.height = 54;
@@ -279,6 +330,7 @@ async function analyzeEffect(asset: AnalysisAsset) {
   if (!context) throw new Error("Canvas analysis is unavailable");
   const brightness: number[] = [];
   const times: number[] = [];
+  let sourceDuration = Infinity;
 
   if (asset.kind === "image") {
     const image = new Image();
@@ -292,14 +344,16 @@ async function analyzeEffect(asset: AnalysisAsset) {
     video.muted = true;
     video.preload = "auto";
     video.src = asset.url;
-    if (video.readyState < 2) await waitForMedia(video, "loadeddata");
+    if (video.readyState < 2) await waitForMedia(video, "loadeddata", signal);
+    sourceDuration = video.duration || 1;
     const inspectDuration = Math.min(8, video.duration || 1);
     for (let index = 0; index < 20; index++) {
+      checkAborted(signal);
       const time = (inspectDuration * index) / 20;
       const targetTime = Math.min(time, Math.max(0, inspectDuration - 0.02));
       if (Math.abs(video.currentTime - targetTime) > 0.01) {
         video.currentTime = targetTime;
-        await waitForMedia(video, "seeked");
+        await waitForMedia(video, "seeked", signal);
       }
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
       brightness.push(frameStats(context.getImageData(0, 0, canvas.width, canvas.height).data).brightness);
@@ -319,6 +373,7 @@ async function analyzeEffect(asset: AnalysisAsset) {
   return {
     assetId: asset.id,
     peakTime: times[peakIndex] || 0,
+    sourceDuration,
     brightness: brightness[peakIndex] || 0.5,
     flashiness,
     suggestedDuration: asset.kind === "image" ? 0.22 : clamp(0.62 - flashiness * 0.42, 0.12, 0.7),
@@ -362,16 +417,17 @@ export async function analyzeProject(
   duration: number,
   assets: AnalysisAsset[],
   report: (value: AnalysisProgress) => void,
+  signal?: AbortSignal,
 ): Promise<AnalysisResult> {
   report({ phase: "audio", progress: 0, message: "Opening the soundtrack" });
-  const audio = await analyzeAudio(file, duration, report);
+  const audio = await analyzeAudio(file, duration, report, signal);
   report({ phase: "footage", progress: 0, message: "Reading visual frames" });
-  const footage = await analyzeFootage(url, duration, report);
+  const footage = await analyzeFootage(url, duration, report, signal);
   const effects: EffectProfile[] = [];
   for (let index = 0; index < assets.length; index++) {
     report({ phase: "effects", progress: index / Math.max(1, assets.length), message: `Reading effect ${index + 1} of ${assets.length}` });
-    effects.push(await analyzeEffect(assets[index]));
-    await yieldFrame();
+    effects.push(await analyzeEffect(assets[index], signal));
+    await yieldFrame(signal);
   }
   report({ phase: "edit", progress: 0.6, message: "Finding musical sections" });
   const sections = detectSections(duration, audio.signals, footage.sceneCuts);
@@ -413,15 +469,21 @@ export function buildSmartPlacements(
   for (const candidate of candidates) {
     if (candidate.score < threshold || candidate.beat - lastTime < minimumGap) continue;
     const profileIndex = Math.floor((candidate.signal.energy + candidate.cutAffinity) * result.effects.length) % Math.max(1, result.effects.length);
-    const profile = result.effects[profileIndex] ?? { assetId: assetIds[placements.length % assetIds.length], peakTime: 0, brightness: 0.5, flashiness: 0.5, suggestedDuration: 0.3 };
+    const profile = result.effects[profileIndex] ?? { assetId: assetIds[placements.length % assetIds.length], peakTime: 0, sourceDuration: Infinity, brightness: 0.5, flashiness: 0.5, suggestedDuration: 0.3 };
     const assetId = assetIds.includes(profile.assetId) ? profile.assetId : assetIds[placements.length % assetIds.length];
     const section = result.sections.find((item) => candidate.beat >= item.start && candidate.beat < item.end) ?? result.sections[0];
+    const idealStart = candidate.beat - profile.peakTime;
+    const sourceStart = Math.max(0, -idealStart);
+    const start = Math.max(0, idealStart);
+    const tail = profile.suggestedDuration * (0.8 + candidate.signal.energy * 0.55);
+    const availableSource = profile.sourceDuration - sourceStart;
     placements.push({
       id: `smart-${candidate.index}-${assetId}`,
       assetId,
       sectionId: section?.id ?? "detected-0",
-      start: Math.max(0, candidate.beat - Math.min(profile.peakTime, 0.35)),
-      duration: clamp(profile.suggestedDuration * (0.8 + candidate.signal.energy * 0.55), 0.1, 0.85),
+      start,
+      sourceStart,
+      duration: Math.min(result.duration - start, availableSource, clamp(profile.peakTime - sourceStart + tail, 0.1, 1.6)),
       scale: Math.round(104 + candidate.score * (intensity === "maximum" ? 52 : 34)),
       opacity: Math.round(78 + candidate.score * 22),
     });
