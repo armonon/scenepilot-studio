@@ -28,12 +28,15 @@ test("server-renders the ScenePilot auto editor", async () => {
   assert.match(html, /DROP VIDEO OR SONG/);
 });
 
-test("keeps the analysis, render, and persistence engines connected", async () => {
-  const [page, analysis, renderEngine, projectStore] = await Promise.all([
+test("keeps the analysis, render, persistence, and standalone engines connected", async () => {
+  const [page, analysis, renderEngine, projectStore, layout, manifest, serviceWorker] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../lib/analysis-engine.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/render-engine.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/project-store.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"),
+    readFile(new URL("../public/sw.js", import.meta.url), "utf8"),
   ]);
   assert.match(page, /renderProject\(/);
   assert.match(page, /saveProject</);
@@ -64,4 +67,9 @@ test("keeps the analysis, render, and persistence engines connected", async () =
   assert.match(renderEngine, /hue-rotate/);
   assert.match(renderEngine, /track\?\.fadeIn/);
   assert.match(projectStore, /indexedDB\.open/);
+  assert.match(page, /StandaloneRuntime/);
+  assert.match(layout, /manifest: "\/manifest\.webmanifest"/);
+  assert.equal(JSON.parse(manifest).display, "standalone");
+  assert.match(serviceWorker, /scenepilot-standalone-v1/);
+  assert.match(serviceWorker, /request\.mode === "navigate"/);
 });

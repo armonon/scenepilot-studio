@@ -37,6 +37,7 @@ import { analyzeProject, buildDirectedPlacements, suggestDirectorPattern } from 
 import type { AnalysisProgress, AnalysisResult, DirectorPattern, RhythmRate } from "../lib/analysis-engine";
 import { renderProject } from "../lib/render-engine";
 import { loadProject, saveProject } from "../lib/project-store";
+import { StandaloneRuntime } from "./standalone-runtime";
 
 type MediaAsset = {
   id: string;
@@ -870,6 +871,7 @@ export default function Home() {
           <ChevronDown size={14} />
         </div>
         <div className="top-actions">
+          <StandaloneRuntime />
           <button className="icon-button" onClick={restoreCurrentProject} disabled={analyzing || rendering} aria-label="Restore saved project" title="Restore project"><FolderOpen size={16} /></button>
           <button className="icon-button" onClick={saveCurrentProject} disabled={!mainFile || analyzing || rendering} aria-label="Save project" title="Save project"><Save size={16} /></button>
           <button className="icon-button" onClick={undo} disabled={!canUndo || analyzing || rendering} aria-label="Undo" title="Undo"><Undo2 size={16} /></button>

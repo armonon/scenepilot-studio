@@ -1,0 +1,18 @@
+{
+  "id": "/",
+  "name": "ScenePilot Studio",
+  "short_name": "ScenePilot",
+  "description": "Beat-aware music video editing with automatic cuts, layered clip tracks, and local rendering.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#090d0c",
+  "theme_color": "#0d1211",
+  "categories": ["photo", "video", "music", "productivity"],
+  "icons": [
+    { "src": "/app-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/app-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/app-icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
