@@ -11,6 +11,7 @@ type InstallPromptEvent = Event & {
 function isStandalone() {
   if (typeof window === "undefined") return false;
   return window.matchMedia("(display-mode: standalone)").matches
+    || navigator.userAgent.includes("ScenePilotDesktop/")
     || Boolean((navigator as Navigator & { standalone?: boolean }).standalone);
 }
 
