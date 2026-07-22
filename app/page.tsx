@@ -137,6 +137,8 @@ export default function Home() {
   const [dragActive, setDragActive] = useState(false);
   const [status, setStatus] = useState("Load a source video to analyze its rhythm");
   const [activePanel, setActivePanel] = useState<"section" | "clip">("section");
+  const [editorMode, setEditorMode] = useState<"auto" | "pro">("auto");
+  const [autoEnergy, setAutoEnergy] = useState<"smooth" | "dynamic" | "maximum">("dynamic");
 
   const selectedSection = sections.find((item) => item.id === selectedSectionId) ?? sections[0];
   const selectedPlacement = placements.find((item) => item.id === selectedPlacementId) ?? null;
@@ -145,6 +147,31 @@ export default function Home() {
   );
   const activeAsset = activePlacement ? assets.find((asset) => asset.id === activePlacement.assetId) : null;
   const visibleBeats = useMemo(() => beats.filter((beat) => beat <= duration), [beats, duration]);
+
+  const makeAutoPlacements = (media: MediaAsset[], rhythm: number[]) => {
+    if (!media.length) return [];
+    const base = autoEnergy === "smooth" ? 8 : autoEnergy === "dynamic" ? 4 : 2;
+    const baseDuration = autoEnergy === "smooth" ? 0.62 : autoEnergy === "dynamic" ? 0.3 : 0.16;
+    return rhythm.flatMap((beat, index) => {
+      const progress = beat / Math.max(duration, 1);
+      const isPeakZone = (progress > 0.31 && progress < 0.48) || (progress > 0.68 && progress < 0.84);
+      const spacing = isPeakZone ? Math.max(1, base / 2) : base;
+      const isPrimary = index % spacing === 0;
+      const isAccent = autoEnergy !== "smooth" && index % (base * 8) === base + 1;
+      if (!isPrimary && !isAccent) return [];
+      const section = sections.find((item) => beat >= item.start && beat < item.end) ?? sections[0];
+      const asset = media[(index + Math.floor(progress * 10)) % media.length];
+      return [{
+        id: `auto-${index}-${asset.id}`,
+        assetId: asset.id,
+        sectionId: section.id,
+        start: beat,
+        duration: Math.min(baseDuration * (isAccent ? 0.55 : 1 + (index % 3) * 0.18), duration - beat),
+        scale: 108 + (index % 4) * (autoEnergy === "maximum" ? 10 : 6),
+        opacity: isAccent ? 82 : 100,
+      }];
+    });
+  };
 
   useEffect(() => {
     return () => {
@@ -164,7 +191,7 @@ export default function Home() {
       video.removeEventListener("timeupdate", update);
       video.removeEventListener("ended", ended);
     };
-  }, [mainUrl]);
+  }, [mainUrl, editorMode]);
 
   const loadMainVideo = (file?: File) => {
     if (!file || !file.type.startsWith("video/")) return;
@@ -200,11 +227,11 @@ export default function Home() {
     if (!incoming.length) return;
     const next = [...assets, ...incoming];
     setAssets(next);
-    setPlacements(makePlacements(next, visibleBeats, sections));
-    setStatus(`${incoming.length} effect${incoming.length === 1 ? "" : "s"} added and placed to the current beat map.`);
+    setPlacements(editorMode === "auto" ? makeAutoPlacements(next, visibleBeats) : makePlacements(next, visibleBeats, sections));
+    setStatus(`${incoming.length} effect${incoming.length === 1 ? "" : "s"} ready for the cut.`);
   };
 
-  const analyzeAudio = async () => {
+  const analyzeAudio = async (auto = false) => {
     if (!mainFile) {
       setStatus("Add the main video first so ScenePilot can hear the track.");
       mainInputRef.current?.click();
@@ -240,17 +267,33 @@ export default function Home() {
       const median = intervals.sort((a, b) => a - b)[Math.floor(intervals.length / 2)] || 0.5;
       setBpm(Math.round(60 / median));
       setBeats(finalBeats);
-      setPlacements(makePlacements(assets, finalBeats, sections));
-      setStatus(`${finalBeats.length} rhythmic edit points found. Section rules are now live.`);
+      const next = auto ? makeAutoPlacements(assets, finalBeats) : makePlacements(assets, finalBeats, sections);
+      setPlacements(next);
+      setStatus(auto ? `Auto cut ready — ${next.length} dynamic hits across the track.` : `${finalBeats.length} rhythmic edit points found. Section rules are now live.`);
       await context.close();
     } catch {
       const fallback = Array.from({ length: Math.ceil(duration * bpm / 60) }, (_, index) => index * (60 / bpm));
       setBeats(fallback);
-      setPlacements(makePlacements(assets, fallback, sections));
-      setStatus("Using the BPM grid. You can still shape every section and placement manually.");
+      const next = auto ? makeAutoPlacements(assets, fallback) : makePlacements(assets, fallback, sections);
+      setPlacements(next);
+      setStatus(auto ? `Auto cut ready — ${next.length} hits built from the BPM grid.` : "Using the BPM grid. You can still shape every section and placement manually.");
     } finally {
       setAnalyzing(false);
     }
+  };
+
+  const runAutoCut = async () => {
+    if (!mainFile) {
+      setStatus("Start with your main music video.");
+      mainInputRef.current?.click();
+      return;
+    }
+    if (!assets.length) {
+      setStatus("Add at least one strobe, light clip, or image.");
+      assetInputRef.current?.click();
+      return;
+    }
+    await analyzeAudio(true);
   };
 
   const rebuildPlacements = () => {
@@ -354,6 +397,80 @@ export default function Home() {
         </div>
       </header>
 
+      {editorMode === "auto" ? (
+        <section className="auto-screen">
+          <div className="auto-heading">
+            <span><Zap size={14} fill="currentColor" /> AUTO CUT</span>
+            <h1>STROBES THAT HIT.</h1>
+            <p>Upload the performance and the light. ScenePilot handles the rhythm.</p>
+          </div>
+
+          <div className="auto-workbench">
+            <div
+              className={`auto-preview ${dragActive ? "is-dragging" : ""}`}
+              onDragOver={(event) => { event.preventDefault(); setDragActive(true); }}
+              onDragLeave={() => setDragActive(false)}
+              onDrop={dropMain}
+            >
+              {mainUrl ? (
+                <video ref={videoRef} src={mainUrl} playsInline preload="metadata" />
+              ) : (
+                <button className="auto-preview-empty" onClick={() => mainInputRef.current?.click()}>
+                  <Film size={42} />
+                  <strong>DROP MAIN VIDEO</strong>
+                  <span>or choose a file</span>
+                </button>
+              )}
+              {activeAsset && activePlacement && (
+                <div className="effect-preview" style={{ opacity: activePlacement.opacity / 100, transform: `scale(${activePlacement.scale / 100})` }}>
+                  {activeAsset.kind === "image" ? <img src={activeAsset.url} alt="" /> : <video src={activeAsset.url} autoPlay muted loop playsInline />}
+                </div>
+              )}
+              <div className="auto-preview-status"><span className={placements.length ? "ready" : ""} />{placements.length ? `${placements.length} HITS READY` : "WAITING FOR MEDIA"}</div>
+              <button className="auto-preview-play" onClick={togglePlayback} aria-label={playing ? "Pause" : "Play"}>{playing ? <Pause size={19} fill="currentColor" /> : <Play size={19} fill="currentColor" />}</button>
+            </div>
+
+            <div className="auto-controls">
+              <div className="auto-media-row">
+                <button className={mainUrl ? "loaded" : ""} onClick={() => mainInputRef.current?.click()}>
+                  <div>{mainUrl ? <Video size={20} /> : <Upload size={20} />}</div>
+                  <span><small>01 / SOURCE</small><strong>{mainUrl ? mainName : "Main video"}</strong></span>
+                  {mainUrl && <i>READY</i>}
+                </button>
+                <button className={assets.length ? "loaded" : ""} onClick={() => assetInputRef.current?.click()}>
+                  <div>{assets.length ? <Sparkles size={20} /> : <Plus size={20} />}</div>
+                  <span><small>02 / EFFECTS</small><strong>{assets.length ? `${assets.length} light ${assets.length === 1 ? "clip" : "clips"}` : "Strobes & lights"}</strong></span>
+                  {assets.length > 0 && <i>READY</i>}
+                </button>
+              </div>
+              <input ref={mainInputRef} hidden type="file" accept="video/*" onChange={(event) => loadMainVideo(event.target.files?.[0])} />
+              <input ref={assetInputRef} hidden type="file" multiple accept="image/*,video/*" onChange={(event) => event.target.files && addAssets(event.target.files)} />
+
+              <div className="energy-control">
+                <div><small>03 / ENERGY</small><strong>How hard should it hit?</strong></div>
+                <div className="energy-options">
+                  <button className={autoEnergy === "smooth" ? "active" : ""} onClick={() => setAutoEnergy("smooth")}><i /><span>SMOOTH</span></button>
+                  <button className={autoEnergy === "dynamic" ? "active" : ""} onClick={() => setAutoEnergy("dynamic")}><i /><i /><span>DYNAMIC</span></button>
+                  <button className={autoEnergy === "maximum" ? "active" : ""} onClick={() => setAutoEnergy("maximum")}><i /><i /><i /><span>MAXIMUM</span></button>
+                </div>
+              </div>
+
+              <button className="auto-cut-button" onClick={runAutoCut} disabled={analyzing}>
+                {analyzing ? <Activity size={19} /> : <WandSparkles size={19} />}
+                <span>{analyzing ? "LISTENING TO THE TRACK..." : placements.length ? "REMIX THE CUT" : "MAKE THE CUT"}</span>
+              </button>
+
+              <div className="auto-readout">
+                <span><Activity size={14} /><strong>{bpm}</strong> BPM</span>
+                <span><Zap size={14} /><strong>{placements.length}</strong> HITS</span>
+                <p>{status}</p>
+                {placements.length > 0 && <button onClick={exportPlan}><Download size={14} /> Export</button>}
+              </div>
+            </div>
+          </div>
+        </section>
+      ) : (
+      <>
       <section className="workspace">
         <div className="monitor-column">
           <div
@@ -395,7 +512,7 @@ export default function Home() {
             <div><Activity size={15} /><strong>{bpm}</strong><span>BPM</span></div>
             <div><Layers3 size={15} /><strong>{placements.length}</strong><span>placements</span></div>
             <p>{status}</p>
-            <button className="analyze-button" onClick={analyzeAudio} disabled={analyzing}><WandSparkles size={16} /> {analyzing ? "Analyzing..." : "Analyze track"}</button>
+            <button className="analyze-button" onClick={() => analyzeAudio(false)} disabled={analyzing}><WandSparkles size={16} /> {analyzing ? "Analyzing..." : "Analyze track"}</button>
           </div>
         </div>
 
@@ -495,6 +612,21 @@ export default function Home() {
           </div>
         </div>
       </section>
+      </>
+      )}
+
+      <footer className="mode-dock">
+        <div>
+          <span>{editorMode === "auto" ? "Want to shape every section?" : "Done arranging?"}</span>
+          <strong>{editorMode === "auto" ? "Switch on the full timeline and clip controls." : "Return to the one-click cut."}</strong>
+        </div>
+        <label className="mode-toggle">
+          <span>AUTO</span>
+          <input type="checkbox" checked={editorMode === "pro"} onChange={(event) => setEditorMode(event.target.checked ? "pro" : "auto")} />
+          <i />
+          <span>PRO ARRANGEMENT</span>
+        </label>
+      </footer>
     </main>
   );
 }
