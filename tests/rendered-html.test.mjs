@@ -24,6 +24,7 @@ test("server-renders the ScenePilot auto editor", async () => {
   assert.match(html, /PRO ARRANGEMENT/);
   assert.match(html, /Render MP4/);
   assert.match(html, /Restore saved project/);
+  assert.match(html, /AUTO DIRECTOR/);
 });
 
 test("keeps the analysis, render, and persistence engines connected", async () => {
@@ -38,6 +39,10 @@ test("keeps the analysis, render, and persistence engines connected", async () =
   assert.match(page, /analysisAbortRef\.current\?\.abort/);
   assert.match(analysis, /sourceStart/);
   assert.match(analysis, /signal\?\.throwIfAborted/);
+  assert.match(analysis, /buildDirectedPlacements/);
+  assert.match(analysis, /pattern === "build"/);
+  assert.match(page, /tapTempo/);
+  assert.match(page, /beatOffset/);
   assert.match(renderEngine, /new Mp4OutputFormat/);
   assert.match(renderEngine, /globalCompositeOperation = "screen"/);
   assert.match(projectStore, /indexedDB\.open/);

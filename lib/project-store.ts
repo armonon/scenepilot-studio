@@ -5,6 +5,7 @@ export type StoredProject<TSection, TPlacement> = {
   assets: Array<{ id: string; name: string; file: File; kind: "image" | "video"; color: string }>;
   duration: number;
   bpm: number;
+  beatOffset?: number;
   beats: number[];
   sections: TSection[];
   placements: TPlacement[];

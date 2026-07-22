@@ -3,6 +3,7 @@
 import {
   Activity,
   ChevronDown,
+  Clock3,
   Clapperboard,
   Download,
   Film,
@@ -14,6 +15,7 @@ import {
   Play,
   Plus,
   Redo2,
+  RefreshCw,
   Save,
   Scissors,
   Settings2,
@@ -28,9 +30,9 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { DragEvent, useEffect, useMemo, useRef, useState } from "react";
-import { analyzeProject, buildSmartPlacements } from "../lib/analysis-engine";
-import type { AnalysisProgress, AnalysisResult } from "../lib/analysis-engine";
+import { DragEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { analyzeProject, buildDirectedPlacements, suggestDirectorPattern } from "../lib/analysis-engine";
+import type { AnalysisProgress, AnalysisResult, DirectorPattern, RhythmRate } from "../lib/analysis-engine";
 import { renderProject } from "../lib/render-engine";
 import { loadProject, saveProject } from "../lib/project-store";
 
@@ -53,6 +55,9 @@ type SectionRule = {
   scale: number;
   enabled: boolean;
   color: string;
+  energy: number;
+  rhythm: RhythmRate;
+  pattern: DirectorPattern;
 };
 
 type Placement = {
@@ -70,11 +75,11 @@ const COLORS = ["#34d6c7", "#ff695d", "#c8ef4b", "#f7c84b", "#5eb8ff"];
 const DEMO_BEATS = Array.from({ length: 360 }, (_, index) => index * 0.5);
 
 const initialSections: SectionRule[] = [
-  { id: "intro", name: "INTRO", start: 0, end: 24, every: 8, duration: 0.5, scale: 108, enabled: true, color: COLORS[0] },
-  { id: "verse", name: "VERSE 1", start: 24, end: 63, every: 8, duration: 0.75, scale: 115, enabled: true, color: COLORS[4] },
-  { id: "chorus", name: "CHORUS", start: 63, end: 102, every: 4, duration: 0.5, scale: 128, enabled: true, color: COLORS[1] },
-  { id: "verse-2", name: "VERSE 2", start: 102, end: 141, every: 8, duration: 0.75, scale: 112, enabled: true, color: COLORS[2] },
-  { id: "outro", name: "OUTRO", start: 141, end: 180, every: 12, duration: 1, scale: 120, enabled: true, color: COLORS[3] },
+  { id: "intro", name: "INTRO", start: 0, end: 24, every: 8, duration: 0.5, scale: 108, enabled: true, color: COLORS[0], energy: 0.2, rhythm: "half", pattern: "restrained" },
+  { id: "verse", name: "VERSE 1", start: 24, end: 63, every: 8, duration: 0.75, scale: 115, enabled: true, color: COLORS[4], energy: 0.42, rhythm: "normal", pattern: "pulse" },
+  { id: "chorus", name: "CHORUS", start: 63, end: 102, every: 4, duration: 0.5, scale: 128, enabled: true, color: COLORS[1], energy: 0.82, rhythm: "normal", pattern: "burst" },
+  { id: "verse-2", name: "VERSE 2", start: 102, end: 141, every: 8, duration: 0.75, scale: 112, enabled: true, color: COLORS[2], energy: 0.48, rhythm: "normal", pattern: "pulse" },
+  { id: "outro", name: "OUTRO", start: 141, end: 180, every: 12, duration: 1, scale: 120, enabled: true, color: COLORS[3], energy: 0.24, rhythm: "half", pattern: "release" },
 ];
 
 function formatTime(seconds: number) {
@@ -84,10 +89,22 @@ function formatTime(seconds: number) {
   return `${String(mins).padStart(2, "0")}:${secs.toFixed(2).padStart(5, "0")}`;
 }
 
+function makeBeatGrid(duration: number, bpm: number, offset: number) {
+  const interval = 60 / Math.max(1, bpm);
+  let first = offset;
+  while (first < 0) first += interval;
+  while (first >= interval) first -= interval;
+  const grid: number[] = [];
+  for (let time = first; time <= duration; time += interval) grid.push(time);
+  return grid;
+}
+
 function buildSections(duration: number): SectionRule[] {
   const names = ["INTRO", "VERSE 1", "CHORUS", "VERSE 2", "OUTRO"];
   const ratios = [0, 0.13, 0.35, 0.57, 0.79, 1];
-  return names.map((name, index) => ({
+  return names.map((name, index) => {
+    const energy = name === "CHORUS" ? 0.82 : name === "OUTRO" ? 0.24 : name === "INTRO" ? 0.2 : 0.45;
+    return ({
     id: `${name.toLowerCase().replaceAll(" ", "-")}-${Date.now()}-${index}`,
     name,
     start: duration * ratios[index],
@@ -97,7 +114,11 @@ function buildSections(duration: number): SectionRule[] {
     scale: name === "CHORUS" ? 128 : 114,
     enabled: true,
     color: COLORS[index],
-  }));
+    energy,
+    rhythm: name === "INTRO" || name === "OUTRO" ? "half" as const : "normal" as const,
+    pattern: suggestDirectorPattern({ name, energy }, index, names.length),
+  });
+  });
 }
 
 function makePlacements(assets: MediaAsset[], beats: number[], sections: SectionRule[]): Placement[] {
@@ -141,7 +162,7 @@ function EffectLayer({ asset, placement, currentTime, playing }: { asset: MediaA
   );
 }
 
-type EditSnapshot = { sections: SectionRule[]; placements: Placement[]; selectedSectionId: string; selectedPlacementId: string | null };
+type EditSnapshot = { sections: SectionRule[]; placements: Placement[]; beats: number[]; bpm: number; beatOffset: number; selectedSectionId: string; selectedPlacementId: string | null };
 
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -154,6 +175,7 @@ export default function Home() {
   const urlsRef = useRef<string[]>([]);
   const historyRef = useRef<EditSnapshot[]>([]);
   const futureRef = useRef<EditSnapshot[]>([]);
+  const tapTimesRef = useRef<number[]>([]);
   const [mainFile, setMainFile] = useState<File | null>(null);
   const [mainUrl, setMainUrl] = useState("");
   const [mainName, setMainName] = useState("3-minute music video");
@@ -164,6 +186,7 @@ export default function Home() {
   const [sections, setSections] = useState<SectionRule[]>(initialSections);
   const [beats, setBeats] = useState<number[]>(DEMO_BEATS);
   const [bpm, setBpm] = useState(120);
+  const [beatOffset, setBeatOffset] = useState(0);
   const [placements, setPlacements] = useState<Placement[]>([]);
   const [selectedSectionId, setSelectedSectionId] = useState(initialSections[2].id);
   const [selectedPlacementId, setSelectedPlacementId] = useState<string | null>(null);
@@ -200,6 +223,7 @@ export default function Home() {
     ? ({ audio: 0, footage: 25, effects: 70, edit: 88 }[analysisProgress.phase]
       + analysisProgress.progress * ({ audio: 25, footage: 45, effects: 18, edit: 12 }[analysisProgress.phase]))
     : 0;
+  const directorArc = sections.map((section) => section.pattern.toUpperCase()).join("  /  ");
   useEffect(() => {
     urlsRef.current = [mainUrl, ...assets.map((asset) => asset.url)].filter(Boolean);
   }, [mainUrl, assets]);
@@ -210,7 +234,7 @@ export default function Home() {
     urlsRef.current.forEach((url) => URL.revokeObjectURL(url));
   }, []);
 
-  const snapshot = (): EditSnapshot => ({ sections, placements, selectedSectionId, selectedPlacementId });
+  const snapshot = (): EditSnapshot => ({ sections, placements, beats, bpm, beatOffset, selectedSectionId, selectedPlacementId });
   const checkpoint = () => {
     historyRef.current = [...historyRef.current.slice(-49), structuredClone(snapshot())];
     futureRef.current = [];
@@ -220,6 +244,9 @@ export default function Home() {
   const restoreSnapshot = (value: EditSnapshot) => {
     setSections(value.sections);
     setPlacements(value.placements);
+    setBeats(value.beats);
+    setBpm(value.bpm);
+    setBeatOffset(value.beatOffset);
     setSelectedSectionId(value.selectedSectionId);
     setSelectedPlacementId(value.selectedPlacementId);
   };
@@ -296,6 +323,15 @@ export default function Home() {
     setStatus(`${incoming.length} effect${incoming.length === 1 ? "" : "s"} ready to be visually profiled.`);
   };
 
+  const composeDirector = (result: AnalysisResult, rules: SectionRule[], grid = result.beats, intensity = autoEnergy) => (
+    buildDirectedPlacements(
+      { ...result, beats: grid },
+      assets.map((asset) => asset.id),
+      intensity,
+      rules,
+    )
+  );
+
   const runAnalysis = async (auto = false) => {
     if (!mainFile) {
       setStatus("Add the main video first so ScenePilot can inspect it.");
@@ -337,8 +373,11 @@ export default function Home() {
         scale: Math.round(108 + section.energy * 28),
         enabled: true,
         color: COLORS[index % COLORS.length],
+        energy: section.energy,
+        rhythm: section.energy > 0.82 ? "double" : section.energy < 0.28 ? "half" : "normal",
+        pattern: suggestDirectorPattern(section, index, result.sections.length),
       }));
-      const smart = buildSmartPlacements(result, assets.map((asset) => asset.id), autoEnergy);
+      const smart = composeDirector(result, detectedSections);
       const next = auto ? smart : smart.map((placement) => {
         const section = detectedSections.find((item) => placement.start >= item.start && placement.start < item.end);
         const profile = result.effects.find((item) => item.assetId === placement.assetId);
@@ -348,6 +387,7 @@ export default function Home() {
       checkpoint();
       setAnalysis(result);
       setBpm(result.bpm);
+      setBeatOffset(0);
       setBeats(result.beats);
       setSections(detectedSections);
       setSelectedSectionId(detectedSections[0]?.id ?? selectedSectionId);
@@ -383,14 +423,14 @@ export default function Home() {
     setAutoEnergy(energy);
     if (!analysis) return;
     checkpoint();
-    const next = buildSmartPlacements(analysis, assets.map((asset) => asset.id), energy);
+    const next = composeDirector(analysis, sections, beats, energy);
     setPlacements(next);
     setStatus(`${energy.toUpperCase()} rebuilt from ${analysis.beats.length} measured beats and ${analysis.sceneCuts.length} scene cuts.`);
   };
 
   const rebuildPlacements = () => {
     checkpoint();
-    const smart = analysis ? buildSmartPlacements(analysis, assets.map((asset) => asset.id), autoEnergy) : null;
+    const smart = analysis ? composeDirector(analysis, sections, beats) : null;
     const next = smart ? smart.filter((placement) => {
       const section = sections.find((item) => placement.start >= item.start && placement.start < item.end);
       return section?.enabled ?? false;
@@ -414,6 +454,41 @@ export default function Home() {
     if (!selectedPlacementId) return;
     checkpoint();
     setPlacements((items) => items.map((item) => (item.id === selectedPlacementId ? { ...item, ...patch } : item)));
+  };
+
+  const applyBeatGrid = (nextBpm: number, nextOffset: number) => {
+    const roundedBpm = Math.round(Math.min(220, Math.max(50, nextBpm)) * 10) / 10;
+    const nextBeats = makeBeatGrid(duration, roundedBpm, nextOffset);
+    checkpoint();
+    setBpm(roundedBpm);
+    setBeatOffset(nextOffset);
+    setBeats(nextBeats);
+    if (analysis) setPlacements(composeDirector(analysis, sections, nextBeats));
+    setStatus(`Beat grid set to ${roundedBpm} BPM with ${nextOffset >= 0 ? "+" : ""}${Math.round(nextOffset * 1000)} ms offset. Auto Director rebuilt the cut.`);
+  };
+
+  const tapTempo = (event: MouseEvent<HTMLButtonElement>) => {
+    const now = event.timeStamp;
+    const previous = tapTimesRef.current.at(-1);
+    if (previous && now - previous > 2000) tapTimesRef.current = [];
+    tapTimesRef.current = [...tapTimesRef.current.slice(-6), now];
+    if (tapTimesRef.current.length < 2) {
+      setStatus("Keep tapping the beat.");
+      return;
+    }
+    const intervals = tapTimesRef.current.slice(1).map((time, index) => time - tapTimesRef.current[index]).sort((a, b) => a - b);
+    const middle = intervals[Math.floor(intervals.length / 2)];
+    applyBeatGrid(60000 / middle, beatOffset);
+  };
+
+  const resetBeatGrid = () => {
+    if (!analysis) return;
+    checkpoint();
+    setBpm(analysis.bpm);
+    setBeatOffset(0);
+    setBeats(analysis.beats);
+    setPlacements(composeDirector(analysis, sections, analysis.beats));
+    setStatus(`Restored the measured ${analysis.bpm} BPM grid and rebuilt Auto Director.`);
   };
 
   const splitAtPlayhead = () => {
@@ -468,6 +543,7 @@ export default function Home() {
       project: mainName,
       duration,
       bpm,
+      beatOffset,
       beatCount: beats.length,
       analysis: analysis ? {
         tempoConfidence: analysis.confidence,
@@ -498,6 +574,7 @@ export default function Home() {
         assets: assets.map(({ id, name, file, kind, color }) => ({ id, name, file, kind, color })),
         duration,
         bpm,
+        beatOffset,
         beats,
         sections,
         placements,
@@ -528,12 +605,19 @@ export default function Home() {
       setAssets(restoredAssets);
       setDuration(stored.duration);
       setBpm(stored.bpm);
+      setBeatOffset(stored.beatOffset ?? 0);
       setBeats(stored.beats);
-      setSections(stored.sections);
+      const restoredSections = stored.sections.map((section, index) => ({
+        ...section,
+        energy: section.energy ?? stored.analysis?.sections[index]?.energy ?? 0.5,
+        rhythm: section.rhythm ?? "normal" as const,
+        pattern: section.pattern ?? suggestDirectorPattern({ name: section.name, energy: section.energy ?? 0.5 }, index, stored.sections.length),
+      }));
+      setSections(restoredSections);
       setPlacements(stored.placements);
       setAnalysis(stored.analysis);
       setAutoEnergy(stored.autoEnergy);
-      setSelectedSectionId(stored.sections[0]?.id ?? "");
+      setSelectedSectionId(restoredSections[0]?.id ?? "");
       setSelectedPlacementId(null);
       setCurrentTime(0);
       historyRef.current = [];
@@ -673,6 +757,11 @@ export default function Home() {
                 </div>
               </div>
 
+              <div className="director-strip">
+                <div><small>04 / AUTO DIRECTOR</small><strong>{analysis ? `${sections.length} musical sections shaped` : "Builds an intentional section arc"}</strong></div>
+                <span>{analysis ? directorArc : "RESTRAINT  /  PULSE  /  BUILD  /  BURST  /  RELEASE"}</span>
+              </div>
+
               {analyzing && analysisProgress && (
                 <div className="analysis-progress" aria-live="polite">
                   <div className="analysis-phase">
@@ -748,6 +837,18 @@ export default function Home() {
             <p>{status}</p>
             <button className="analyze-button" onClick={analyzing ? () => analysisAbortRef.current?.abort() : () => runAnalysis(false)} disabled={rendering}><WandSparkles size={16} /> {analyzing ? "Cancel analysis" : "Analyze media"}</button>
           </div>
+
+          <div className="beat-grid-panel">
+            <div className="beat-grid-title"><Clock3 size={15} /><span><strong>Beat grid</strong><small>Correct the musical timing</small></span></div>
+            <div className="beat-bpm-control">
+              <button onClick={() => applyBeatGrid(bpm - 1, beatOffset)} aria-label="Decrease BPM">−</button>
+              <strong>{bpm}</strong><span>BPM</span>
+              <button onClick={() => applyBeatGrid(bpm + 1, beatOffset)} aria-label="Increase BPM">+</button>
+            </div>
+            <button className="tap-tempo" onClick={tapTempo}>TAP</button>
+            <label className="beat-offset"><span>OFFSET</span><input type="range" min="-0.5" max="0.5" step="0.005" value={beatOffset} onChange={(event) => applyBeatGrid(bpm, Number(event.target.value))} /><strong>{beatOffset >= 0 ? "+" : ""}{Math.round(beatOffset * 1000)}ms</strong></label>
+            <button className="icon-button" onClick={resetBeatGrid} disabled={!analysis} aria-label="Restore analyzed beat grid" title="Restore analyzed grid"><RefreshCw size={15} /></button>
+          </div>
         </div>
 
         <aside className="control-column">
@@ -782,7 +883,8 @@ export default function Home() {
           {activePanel === "section" && selectedSection && (
             <div className="inspector">
               <div className="inspector-title"><span style={{ background: selectedSection.color }} /><div><strong>{selectedSection.name}</strong><small>{formatTime(selectedSection.start)} — {formatTime(selectedSection.end)}</small></div><label className="switch"><input type="checkbox" checked={selectedSection.enabled} onChange={(event) => updateSection({ enabled: event.target.checked })} /><i /></label></div>
-              <label className="field"><span>Place every</span><div className="stepper"><button onClick={() => updateSection({ every: Math.max(1, selectedSection.every - 1) })}>−</button><strong>{selectedSection.every} beats</strong><button onClick={() => updateSection({ every: selectedSection.every + 1 })}>+</button></div></label>
+              <label className="field"><span>Director pattern</span><select className="director-select" value={selectedSection.pattern} onChange={(event) => updateSection({ pattern: event.target.value as DirectorPattern })}><option value="restrained">Restrained</option><option value="pulse">Pulse</option><option value="build">Build</option><option value="burst">Burst</option><option value="release">Release</option></select></label>
+              <div className="field"><span>Rhythm rate</span><div className="rhythm-segments">{(["half", "normal", "double"] as const).map((rate) => <button key={rate} className={selectedSection.rhythm === rate ? "active" : ""} onClick={() => updateSection({ rhythm: rate })}>{rate === "half" ? "½" : rate === "double" ? "2×" : "1×"}</button>)}</div></div>
               <label className="field"><span>Effect duration</span><div className="value-line"><input type="range" min="0.1" max="4" step="0.05" value={selectedSection.duration} onChange={(event) => updateSection({ duration: Number(event.target.value) })} /><strong>{selectedSection.duration.toFixed(2)}s</strong></div></label>
               <label className="field"><span>Scale</span><div className="value-line"><input type="range" min="50" max="180" value={selectedSection.scale} onChange={(event) => updateSection({ scale: Number(event.target.value) })} /><strong>{selectedSection.scale}%</strong></div></label>
               <div className="inspector-actions"><button onClick={splitAtPlayhead}><Scissors size={15} /> Split at playhead</button><button className="primary" onClick={rebuildPlacements}><Sparkles size={15} /> Fill timeline</button></div>
@@ -813,7 +915,7 @@ export default function Home() {
               <div className="track-label"><Split size={15} /><span>SECTIONS</span></div>
               <div className="track-content">
                 {sections.map((section) => (
-                  <button key={section.id} className={`section-block ${section.id === selectedSectionId ? "selected" : ""}`} style={{ left: `${(section.start / duration) * 100}%`, width: `${((section.end - section.start) / duration) * 100}%`, borderColor: section.color, color: section.color }} onClick={() => { setSelectedSectionId(section.id); setActivePanel("section"); }}><span>{section.name}</span><small>every {section.every}</small></button>
+                  <button key={section.id} className={`section-block ${section.id === selectedSectionId ? "selected" : ""}`} style={{ left: `${(section.start / duration) * 100}%`, width: `${((section.end - section.start) / duration) * 100}%`, borderColor: section.color, color: section.color }} onClick={() => { setSelectedSectionId(section.id); setActivePanel("section"); }}><span>{section.name}</span><small>{section.pattern} · {section.rhythm === "half" ? "½×" : section.rhythm === "double" ? "2×" : "1×"}</small></button>
                 ))}
               </div>
             </div>

@@ -72,6 +72,19 @@ export type SmartPlacement = {
   opacity: number;
 };
 
+export type DirectorPattern = "restrained" | "pulse" | "build" | "burst" | "release";
+export type RhythmRate = "half" | "normal" | "double";
+export type DirectorSection = {
+  id: string;
+  name: string;
+  start: number;
+  end: number;
+  energy: number;
+  enabled?: boolean;
+  rhythm?: RhythmRate;
+  pattern?: DirectorPattern;
+};
+
 const SECTION_NAMES = ["OPEN", "VERSE", "BUILD", "PEAK", "BREAK", "FINAL", "OUTRO"];
 
 function clamp(value: number, min = 0, max = 1) {
@@ -446,48 +459,104 @@ export async function analyzeProject(
   };
 }
 
+export function suggestDirectorPattern(section: Pick<DirectorSection, "name" | "energy">, index: number, count: number): DirectorPattern {
+  const name = section.name.toUpperCase();
+  if (name.includes("BUILD")) return "build";
+  if (name.includes("PEAK") || name.includes("CHORUS") || name.includes("FINAL") || section.energy >= 0.7) return "burst";
+  if (name.includes("OUTRO") || name.includes("BREAK") || index === count - 1) return "release";
+  if (name.includes("OPEN") || name.includes("INTRO") || index === 0) return "restrained";
+  return "pulse";
+}
+
+function sectionBeatGrid(beats: number[], section: DirectorSection) {
+  const base = beats.filter((beat) => beat >= section.start && beat < section.end);
+  if (section.rhythm === "half") return base.filter((_, index) => index % 2 === 0);
+  if (section.rhythm !== "double") return base;
+  const doubled: number[] = [];
+  for (let index = 0; index < base.length; index++) {
+    doubled.push(base[index]);
+    const next = base[index + 1];
+    if (next != null) doubled.push((base[index] + next) / 2);
+  }
+  return doubled;
+}
+
+export function buildDirectedPlacements(
+  result: AnalysisResult,
+  assetIds: string[],
+  intensity: "smooth" | "dynamic" | "maximum",
+  directedSections: DirectorSection[] = result.sections,
+): SmartPlacement[] {
+  if (!assetIds.length) return [];
+  const placements: SmartPlacement[] = [];
+  const intensityFactor = intensity === "smooth" ? 0.72 : intensity === "maximum" ? 1.35 : 1;
+
+  directedSections.forEach((section, sectionIndex) => {
+    if (section.enabled === false) return;
+    const pattern = section.pattern ?? suggestDirectorPattern(section, sectionIndex, directedSections.length);
+    const grid = sectionBeatGrid(result.beats, section);
+    if (!grid.length) return;
+    const candidates = grid.map((beat, index) => {
+      const signal = nearestSignal(result.signals, beat);
+      const visual = result.visuals.length
+        ? result.visuals.reduce((best, point) => Math.abs(point.time - beat) < Math.abs(best.time - beat) ? point : best, result.visuals[0])
+        : undefined;
+      const nearestCut = result.sceneCuts.reduce((distance, cut) => Math.min(distance, Math.abs(cut.time - beat)), Infinity);
+      const cutAffinity = nearestCut < 0.18 ? 1 : nearestCut < 0.45 ? 0.55 : 0;
+      const downbeat = index % 4 === 0 ? 1 : 0;
+      const score = signal.onset * 0.4 + signal.energy * 0.24 + downbeat * 0.2 + cutAffinity * 0.11 + clamp(visual?.motion || 0) * 0.05;
+      return { beat, index, signal, cutAffinity, score };
+    });
+    const strong = quantile(candidates.map((candidate) => candidate.score), intensity === "smooth" ? 0.72 : intensity === "maximum" ? 0.4 : 0.58);
+    let selected = candidates.filter((candidate) => {
+      const progress = candidate.index / Math.max(1, candidates.length - 1);
+      if (pattern === "restrained") return candidate.index % Math.max(3, Math.round(4 / intensityFactor)) === 0 || candidate.cutAffinity === 1;
+      if (pattern === "pulse") return candidate.index % Math.max(2, Math.round(3 / intensityFactor)) === 0 || candidate.score >= strong;
+      if (pattern === "build") {
+        const stride = progress > 0.72 ? 1 : progress > 0.38 ? 2 : 4;
+        return candidate.index % Math.max(1, Math.round(stride / intensityFactor)) === 0;
+      }
+      if (pattern === "burst") {
+        const cycle = intensity === "maximum" ? 6 : 8;
+        const burstLength = intensity === "smooth" ? 2 : intensity === "maximum" ? 4 : 3;
+        return candidate.index % cycle < burstLength || candidate.cutAffinity === 1;
+      }
+      return candidate.index === 0 || candidate.cutAffinity === 1 || (candidate.index % Math.max(4, Math.round(6 / intensityFactor)) === 0 && progress < 0.72);
+    });
+    if (!selected.length) selected = [candidates.reduce((best, candidate) => candidate.score > best.score ? candidate : best, candidates[0])];
+
+    selected.forEach((candidate, selectedIndex) => {
+      const profiles = result.effects.length ? result.effects : assetIds.map((assetId) => ({ assetId, peakTime: 0, sourceDuration: Infinity, brightness: 0.5, flashiness: 0.5, suggestedDuration: 0.3 }));
+      const desiredFlash = pattern === "burst" ? 0.85 : pattern === "build" ? 0.62 : pattern === "release" ? 0.25 : 0.45;
+      const ranked = [...profiles].sort((a, b) => Math.abs(a.flashiness - desiredFlash) - Math.abs(b.flashiness - desiredFlash));
+      const profile = ranked[(selectedIndex + sectionIndex) % ranked.length];
+      const assetId = assetIds.includes(profile.assetId) ? profile.assetId : assetIds[(selectedIndex + sectionIndex) % assetIds.length];
+      const idealStart = candidate.beat - profile.peakTime;
+      const sourceStart = Math.max(0, -idealStart);
+      const start = Math.max(0, idealStart);
+      const tailMultiplier = pattern === "release" ? 1.35 : pattern === "burst" ? 0.72 : 1;
+      const tail = profile.suggestedDuration * tailMultiplier * (0.8 + candidate.signal.energy * 0.55);
+      const availableSource = profile.sourceDuration - sourceStart;
+      const patternScale = pattern === "restrained" ? -4 : pattern === "burst" ? 16 : pattern === "build" ? Math.round((candidate.index / candidates.length) * 14) : 4;
+      placements.push({
+        id: `directed-${section.id}-${candidate.index}-${assetId}`,
+        assetId,
+        sectionId: section.id,
+        start,
+        sourceStart,
+        duration: Math.min(section.end - start, result.duration - start, availableSource, clamp(profile.peakTime - sourceStart + tail, 0.1, pattern === "release" ? 2 : 1.6)),
+        scale: Math.round(104 + candidate.score * (intensity === "maximum" ? 42 : 30) + patternScale),
+        opacity: Math.round(clamp(74 + candidate.score * 25 + (pattern === "burst" ? 4 : 0), 50, 100)),
+      });
+    });
+  });
+  return placements.sort((a, b) => a.start - b.start);
+}
+
 export function buildSmartPlacements(
   result: AnalysisResult,
   assetIds: string[],
   intensity: "smooth" | "dynamic" | "maximum",
 ): SmartPlacement[] {
-  if (!assetIds.length) return [];
-  const candidates = result.beats.map((beat, index) => {
-    const signal = nearestSignal(result.signals, beat);
-    const visual = result.visuals.reduce((best, point) => Math.abs(point.time - beat) < Math.abs(best.time - beat) ? point : best, result.visuals[0]);
-    const nearestCut = result.sceneCuts.reduce((distance, cut) => Math.min(distance, Math.abs(cut.time - beat)), Infinity);
-    const downbeat = index % 4 === 0 ? 1 : 0;
-    const cutAffinity = nearestCut < 0.18 ? 1 : nearestCut < 0.45 ? 0.55 : 0;
-    const score = signal.onset * 0.38 + signal.energy * 0.25 + downbeat * 0.2 + cutAffinity * 0.12 + clamp(visual?.motion || 0) * 0.05;
-    return { beat, index, score, signal, visual, cutAffinity };
-  });
-  const density = intensity === "smooth" ? 0.18 : intensity === "dynamic" ? 0.42 : 0.7;
-  const threshold = quantile(candidates.map((candidate) => candidate.score), 1 - density);
-  const minimumGap = intensity === "smooth" ? 1.1 : intensity === "dynamic" ? 0.45 : 0.22;
-  const placements: SmartPlacement[] = [];
-  let lastTime = -Infinity;
-  for (const candidate of candidates) {
-    if (candidate.score < threshold || candidate.beat - lastTime < minimumGap) continue;
-    const profileIndex = Math.floor((candidate.signal.energy + candidate.cutAffinity) * result.effects.length) % Math.max(1, result.effects.length);
-    const profile = result.effects[profileIndex] ?? { assetId: assetIds[placements.length % assetIds.length], peakTime: 0, sourceDuration: Infinity, brightness: 0.5, flashiness: 0.5, suggestedDuration: 0.3 };
-    const assetId = assetIds.includes(profile.assetId) ? profile.assetId : assetIds[placements.length % assetIds.length];
-    const section = result.sections.find((item) => candidate.beat >= item.start && candidate.beat < item.end) ?? result.sections[0];
-    const idealStart = candidate.beat - profile.peakTime;
-    const sourceStart = Math.max(0, -idealStart);
-    const start = Math.max(0, idealStart);
-    const tail = profile.suggestedDuration * (0.8 + candidate.signal.energy * 0.55);
-    const availableSource = profile.sourceDuration - sourceStart;
-    placements.push({
-      id: `smart-${candidate.index}-${assetId}`,
-      assetId,
-      sectionId: section?.id ?? "detected-0",
-      start,
-      sourceStart,
-      duration: Math.min(result.duration - start, availableSource, clamp(profile.peakTime - sourceStart + tail, 0.1, 1.6)),
-      scale: Math.round(104 + candidate.score * (intensity === "maximum" ? 52 : 34)),
-      opacity: Math.round(78 + candidate.score * 22),
-    });
-    lastTime = candidate.beat;
-  }
-  return placements;
+  return buildDirectedPlacements(result, assetIds, intensity);
 }
