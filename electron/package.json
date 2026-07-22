@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "ScenePilot beat-aware music video editor for macOS",
   "author": "ScenePilot Studio",
+  "repository": "https://github.com/armonon/scenepilot-studio",
   "main": "main.js",
   "type": "module",
   "build": {

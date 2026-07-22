@@ -29,7 +29,7 @@ test("server-renders the ScenePilot auto editor", async () => {
 });
 
 test("keeps the analysis, render, persistence, and standalone engines connected", async () => {
-  const [page, analysis, renderEngine, projectStore, layout, manifest, serviceWorker] = await Promise.all([
+  const [page, analysis, renderEngine, projectStore, layout, manifest, serviceWorker, desktop, releaseWorkflow] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../lib/analysis-engine.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/render-engine.ts", import.meta.url), "utf8"),
@@ -37,6 +37,8 @@ test("keeps the analysis, render, persistence, and standalone engines connected"
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"),
     readFile(new URL("../public/sw.js", import.meta.url), "utf8"),
+    readFile(new URL("../electron/main.js", import.meta.url), "utf8"),
+    readFile(new URL("../.github/workflows/release-macos.yml", import.meta.url), "utf8"),
   ]);
   assert.match(page, /renderProject\(/);
   assert.match(page, /saveProject</);
@@ -72,4 +74,8 @@ test("keeps the analysis, render, persistence, and standalone engines connected"
   assert.equal(JSON.parse(manifest).display, "standalone");
   assert.match(serviceWorker, /scenepilot-standalone-v1/);
   assert.match(serviceWorker, /request\.mode === "navigate"/);
+  assert.match(desktop, /checkForUpdates/);
+  assert.match(desktop, /releases\/latest/);
+  assert.match(desktop, /downloadURL/);
+  assert.match(releaseWorkflow, /gh release create/);
 });
