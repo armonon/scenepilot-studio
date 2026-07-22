@@ -25,12 +25,28 @@ export type RenderPlacement = {
   duration: number;
   scale: number;
   opacity: number;
+  trackId?: string;
+};
+
+export type RenderTrack = {
+  id: string;
+  enabled: boolean;
+  blend: "screen" | "normal" | "overlay" | "multiply";
+  opacity: number;
+  hue: number;
+  saturation: number;
+  brightness: number;
+  glow: number;
+  color: string;
+  fadeIn: number;
+  fadeOut: number;
 };
 
 type RenderOptions = {
   mainFile: File;
   assets: RenderAsset[];
   placements: RenderPlacement[];
+  tracks?: RenderTrack[];
   duration: number;
   signal?: AbortSignal;
   onProgress?: (progress: number, message: string) => void;
@@ -47,7 +63,7 @@ function abortError(signal?: AbortSignal) {
   signal?.throwIfAborted();
 }
 
-export async function renderProject({ mainFile, assets, placements, duration, signal, onProgress }: RenderOptions) {
+export async function renderProject({ mainFile, assets, placements, tracks = [], duration, signal, onProgress }: RenderOptions) {
   if (!("VideoEncoder" in window) || !("VideoDecoder" in window)) {
     throw new Error("This browser cannot render video yet. Open ScenePilot in a current Chrome or Edge browser.");
   }
@@ -129,18 +145,27 @@ export async function renderProject({ mainFile, assets, placements, duration, si
         sample.close();
       }
 
-      const active = placements.filter((placement) => time >= placement.start && time < placement.start + placement.duration);
+      const active = placements
+        .filter((placement) => time >= placement.start && time < placement.start + placement.duration)
+        .sort((a, b) => tracks.findIndex((track) => track.id === a.trackId) - tracks.findIndex((track) => track.id === b.trackId));
       for (const placement of active) {
         const asset = assets.find((item) => item.id === placement.assetId);
         if (!asset) continue;
+        const track = tracks.find((item) => item.id === placement.trackId);
+        if (track?.enabled === false) continue;
+        const clipTime = time - placement.start;
+        const remaining = placement.duration - clipTime;
+        const fadeIn = track?.fadeIn ? Math.min(1, clipTime / track.fadeIn) : 1;
+        const fadeOut = track?.fadeOut ? Math.min(1, remaining / track.fadeOut) : 1;
         const zoom = placement.scale / 100;
         const drawWidth = width * zoom;
         const drawHeight = height * zoom;
         const x = (width - drawWidth) / 2;
         const y = (height - drawHeight) / 2;
         context.save();
-        context.globalAlpha = placement.opacity / 100;
-        context.globalCompositeOperation = "screen";
+        context.globalAlpha = placement.opacity / 100 * (track?.opacity ?? 100) / 100 * Math.min(fadeIn, fadeOut);
+        context.globalCompositeOperation = track?.blend === "normal" ? "source-over" : track?.blend ?? "screen";
+        context.filter = `hue-rotate(${track?.hue ?? 0}deg) saturate(${track?.saturation ?? 100}%) brightness(${track?.brightness ?? 100}%) drop-shadow(0 0 ${track?.glow ?? 0}px ${track?.color ?? "#ffffff"})`;
         if (asset.kind === "image") {
           const bitmap = bitmaps.get(asset.id);
           if (bitmap) context.drawImage(bitmap, x, y, drawWidth, drawHeight);

@@ -1,6 +1,6 @@
 import type { AnalysisResult } from "./analysis-engine";
 
-export type StoredProject<TSection, TPlacement> = {
+export type StoredProject<TSection, TPlacement, TTrack = unknown> = {
   mainFile: File;
   assets: Array<{ id: string; name: string; file: File; kind: "image" | "video"; color: string }>;
   duration: number;
@@ -9,6 +9,7 @@ export type StoredProject<TSection, TPlacement> = {
   beats: number[];
   sections: TSection[];
   placements: TPlacement[];
+  tracks?: TTrack[];
   analysis: AnalysisResult | null;
   autoEnergy: "smooth" | "dynamic" | "maximum";
   savedAt: number;
@@ -27,7 +28,7 @@ function openDatabase() {
   });
 }
 
-export async function saveProject<TSection, TPlacement>(project: StoredProject<TSection, TPlacement>) {
+export async function saveProject<TSection, TPlacement, TTrack = unknown>(project: StoredProject<TSection, TPlacement, TTrack>) {
   const database = await openDatabase();
   try {
     await new Promise<void>((resolve, reject) => {
@@ -41,10 +42,10 @@ export async function saveProject<TSection, TPlacement>(project: StoredProject<T
   }
 }
 
-export async function loadProject<TSection, TPlacement>() {
+export async function loadProject<TSection, TPlacement, TTrack = unknown>() {
   const database = await openDatabase();
   try {
-    return await new Promise<StoredProject<TSection, TPlacement> | null>((resolve, reject) => {
+    return await new Promise<StoredProject<TSection, TPlacement, TTrack> | null>((resolve, reject) => {
       const request = database.transaction(STORE_NAME).objectStore(STORE_NAME).get(CURRENT_PROJECT);
       request.onsuccess = () => resolve(request.result ?? null);
       request.onerror = () => reject(request.error ?? new Error("Project could not be restored."));

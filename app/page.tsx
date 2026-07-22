@@ -12,6 +12,7 @@ import {
   Layers3,
   Maximize2,
   Music2,
+  Palette,
   Pause,
   Play,
   Plus,
@@ -70,10 +71,30 @@ type Placement = {
   duration: number;
   scale: number;
   opacity: number;
+  trackId?: string;
+};
+
+type ClipTrack = {
+  id: string;
+  name: string;
+  color: string;
+  enabled: boolean;
+  blend: "screen" | "normal" | "overlay" | "multiply";
+  opacity: number;
+  hue: number;
+  saturation: number;
+  brightness: number;
+  glow: number;
+  fadeIn: number;
+  fadeOut: number;
 };
 
 const COLORS = ["#34d6c7", "#ff695d", "#c8ef4b", "#f7c84b", "#5eb8ff"];
 const DEMO_BEATS = Array.from({ length: 360 }, (_, index) => index * 0.5);
+const initialClipTracks: ClipTrack[] = [
+  { id: "clip-track-1", name: "LIGHT HITS", color: COLORS[0], enabled: true, blend: "screen", opacity: 100, hue: 0, saturation: 110, brightness: 105, glow: 12, fadeIn: 0.03, fadeOut: 0.1 },
+  { id: "clip-track-2", name: "OVERLAYS", color: COLORS[1], enabled: true, blend: "overlay", opacity: 82, hue: 0, saturation: 100, brightness: 100, glow: 0, fadeIn: 0.08, fadeOut: 0.18 },
+];
 
 const initialSections: SectionRule[] = [
   { id: "intro", name: "INTRO", start: 0, end: 24, every: 8, duration: 0.5, scale: 108, enabled: true, color: COLORS[0], energy: 0.2, rhythm: "half", pattern: "restrained" },
@@ -128,7 +149,7 @@ function buildSections(duration: number): SectionRule[] {
   });
 }
 
-function makePlacements(assets: MediaAsset[], beats: number[], sections: SectionRule[]): Placement[] {
+function makePlacements(assets: MediaAsset[], beats: number[], sections: SectionRule[], tracks: ClipTrack[] = initialClipTracks): Placement[] {
   if (!assets.length) return [];
   const next: Placement[] = [];
   sections.forEach((section, sectionIndex) => {
@@ -146,13 +167,14 @@ function makePlacements(assets: MediaAsset[], beats: number[], sections: Section
         duration: Math.min(section.duration, section.end - beat),
         scale: section.scale,
         opacity: 100,
+        trackId: tracks[Math.max(0, assets.indexOf(asset)) % tracks.length]?.id,
       });
     });
   });
   return next;
 }
 
-function EffectLayer({ asset, placement, currentTime, playing }: { asset: MediaAsset; placement: Placement; currentTime: number; playing: boolean }) {
+function EffectLayer({ asset, placement, track, currentTime, playing }: { asset: MediaAsset; placement: Placement; track: ClipTrack; currentTime: number; playing: boolean }) {
   const ref = useRef<HTMLVideoElement>(null);
   const localTime = (placement.sourceStart ?? 0) + currentTime - placement.start;
   useEffect(() => {
@@ -162,14 +184,19 @@ function EffectLayer({ asset, placement, currentTime, playing }: { asset: MediaA
     if (playing) void video.play().catch(() => undefined);
     else video.pause();
   }, [asset.kind, localTime, playing]);
+  const clipTime = Math.max(0, currentTime - placement.start);
+  const remaining = Math.max(0, placement.duration - clipTime);
+  const fadeIn = track.fadeIn > 0 ? Math.min(1, clipTime / track.fadeIn) : 1;
+  const fadeOut = track.fadeOut > 0 ? Math.min(1, remaining / track.fadeOut) : 1;
+  const opacity = placement.opacity / 100 * track.opacity / 100 * Math.min(fadeIn, fadeOut);
   return (
-    <div className="effect-preview" style={{ opacity: placement.opacity / 100, transform: `scale(${placement.scale / 100})` }}>
+    <div className="effect-preview" style={{ opacity, transform: `scale(${placement.scale / 100})`, mixBlendMode: track.blend, filter: `hue-rotate(${track.hue}deg) saturate(${track.saturation}%) brightness(${track.brightness}%) drop-shadow(0 0 ${track.glow}px ${track.color})` }}>
       {asset.kind === "image" ? <img src={asset.url} alt="" /> : <video ref={ref} src={asset.url} muted playsInline preload="auto" />}
     </div>
   );
 }
 
-type EditSnapshot = { sections: SectionRule[]; placements: Placement[]; beats: number[]; bpm: number; beatOffset: number; selectedSectionId: string; selectedPlacementId: string | null };
+type EditSnapshot = { sections: SectionRule[]; placements: Placement[]; clipTracks: ClipTrack[]; beats: number[]; bpm: number; beatOffset: number; selectedSectionId: string; selectedPlacementId: string | null; selectedTrackId: string };
 
 export default function Home() {
   const videoRef = useRef<HTMLMediaElement>(null);
@@ -196,12 +223,15 @@ export default function Home() {
   const [bpm, setBpm] = useState(120);
   const [beatOffset, setBeatOffset] = useState(0);
   const [placements, setPlacements] = useState<Placement[]>([]);
+  const [clipTracks, setClipTracks] = useState<ClipTrack[]>(initialClipTracks);
+  const [selectedTrackId, setSelectedTrackId] = useState(initialClipTracks[0].id);
+  const [draggingPlacementId, setDraggingPlacementId] = useState<string | null>(null);
   const [selectedSectionId, setSelectedSectionId] = useState(initialSections[2].id);
   const [selectedPlacementId, setSelectedPlacementId] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [status, setStatus] = useState("Load a video or song to analyze its rhythm");
-  const [activePanel, setActivePanel] = useState<"section" | "clip">("section");
+  const [activePanel, setActivePanel] = useState<"section" | "clip" | "track">("section");
   const [editorMode, setEditorMode] = useState<"auto" | "pro">("auto");
   const [autoEnergy, setAutoEnergy] = useState<"smooth" | "dynamic" | "maximum">("dynamic");
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
@@ -214,9 +244,10 @@ export default function Home() {
 
   const selectedSection = sections.find((item) => item.id === selectedSectionId) ?? sections[0];
   const selectedPlacement = placements.find((item) => item.id === selectedPlacementId) ?? null;
+  const selectedTrack = clipTracks.find((item) => item.id === (selectedPlacement?.trackId ?? selectedTrackId)) ?? clipTracks[0];
   const activePlacements = placements.filter(
-    (item) => currentTime >= item.start && currentTime < item.start + item.duration,
-  );
+    (item) => currentTime >= item.start && currentTime < item.start + item.duration && clipTracks.find((track) => track.id === (item.trackId ?? clipTracks[0]?.id))?.enabled !== false,
+  ).sort((a, b) => clipTracks.findIndex((track) => track.id === (a.trackId ?? clipTracks[0]?.id)) - clipTracks.findIndex((track) => track.id === (b.trackId ?? clipTracks[0]?.id)));
   const visibleBeats = useMemo(() => beats.filter((beat) => beat <= duration), [beats, duration]);
   const energyBars = useMemo(() => {
     if (!analysis?.signals.length) return Array.from({ length: 180 }, () => 8);
@@ -256,7 +287,7 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [analyzing]);
 
-  const snapshot = (): EditSnapshot => ({ sections, placements, beats, bpm, beatOffset, selectedSectionId, selectedPlacementId });
+  const snapshot = (): EditSnapshot => ({ sections, placements, clipTracks, beats, bpm, beatOffset, selectedSectionId, selectedPlacementId, selectedTrackId });
   const checkpoint = () => {
     historyRef.current = [...historyRef.current.slice(-49), structuredClone(snapshot())];
     futureRef.current = [];
@@ -266,11 +297,13 @@ export default function Home() {
   const restoreSnapshot = (value: EditSnapshot) => {
     setSections(value.sections);
     setPlacements(value.placements);
+    setClipTracks(value.clipTracks);
     setBeats(value.beats);
     setBpm(value.bpm);
     setBeatOffset(value.beatOffset);
     setSelectedSectionId(value.selectedSectionId);
     setSelectedPlacementId(value.selectedPlacementId);
+    setSelectedTrackId(value.selectedTrackId);
   };
   const undo = () => {
     const previous = historyRef.current.pop();
@@ -342,18 +375,21 @@ export default function Home() {
     if (!incoming.length) return;
     const next = [...assets, ...incoming];
     setAssets(next);
-    setPlacements(editorMode === "auto" ? [] : makePlacements(next, visibleBeats, sections));
+    setPlacements(editorMode === "auto" ? [] : makePlacements(next, visibleBeats, sections, clipTracks));
     setAnalysis(null);
     setStatus(`${incoming.length} effect${incoming.length === 1 ? "" : "s"} ready to be visually profiled.`);
   };
 
-  const composeDirector = (result: AnalysisResult, rules: SectionRule[], grid = result.beats, intensity = autoEnergy) => (
+  const composeDirector = (result: AnalysisResult, rules: SectionRule[], grid = result.beats, intensity = autoEnergy): Placement[] => (
     buildDirectedPlacements(
       { ...result, beats: grid },
       assets.map((asset) => asset.id),
       intensity,
       rules,
-    )
+    ).map((placement) => {
+      const assetIndex = Math.max(0, assets.findIndex((asset) => asset.id === placement.assetId));
+      return { ...placement, trackId: clipTracks[assetIndex % Math.max(1, clipTracks.length)]?.id };
+    })
   );
 
   const runAnalysis = async (auto = false) => {
@@ -461,10 +497,10 @@ export default function Home() {
       return section?.enabled ?? false;
     }).map((placement) => {
       const section = sections.find((item) => placement.start >= item.start && placement.start < item.end);
-      const profile = analysis.effects.find((item) => item.assetId === placement.assetId);
+      const profile = analysis?.effects.find((item) => item.assetId === placement.assetId);
       const peakWindow = Math.max(0.1, (profile?.peakTime ?? 0) - placement.sourceStart + 0.08);
       return section ? { ...placement, duration: Math.min(section.end - placement.start, Math.max(section.duration, peakWindow)), scale: section.scale } : placement;
-    }) : makePlacements(assets, visibleBeats, sections);
+    }) : makePlacements(assets, visibleBeats, sections, clipTracks);
     setPlacements(next);
     setSelectedPlacementId(null);
     setStatus(`${next.length} deliberate placements built across ${sections.length} sections.`);
@@ -479,6 +515,89 @@ export default function Home() {
     if (!selectedPlacementId) return;
     checkpoint();
     setPlacements((items) => items.map((item) => (item.id === selectedPlacementId ? { ...item, ...patch } : item)));
+  };
+
+  const addClipTrack = () => {
+    checkpoint();
+    const index = clipTracks.length;
+    const track: ClipTrack = {
+      id: `clip-track-${crypto.randomUUID()}`,
+      name: `CLIP TRACK ${index + 1}`,
+      color: COLORS[index % COLORS.length],
+      enabled: true,
+      blend: index % 2 ? "overlay" : "screen",
+      opacity: 100,
+      hue: 0,
+      saturation: 100,
+      brightness: 100,
+      glow: 0,
+      fadeIn: 0.05,
+      fadeOut: 0.12,
+    };
+    setClipTracks((items) => [...items, track]);
+    setSelectedTrackId(track.id);
+    setSelectedPlacementId(null);
+    setActivePanel("track");
+    setStatus(`${track.name} added. Drag media or existing clips onto it.`);
+  };
+
+  const updateClipTrack = (patch: Partial<ClipTrack>) => {
+    if (!selectedTrack) return;
+    checkpoint();
+    setClipTracks((items) => items.map((track) => track.id === selectedTrack.id ? { ...track, ...patch } : track));
+  };
+
+  const removeClipTrack = (trackId: string) => {
+    if (clipTracks.length <= 1) return;
+    checkpoint();
+    const fallback = clipTracks.find((track) => track.id !== trackId);
+    setClipTracks((items) => items.filter((track) => track.id !== trackId));
+    setPlacements((items) => items.map((placement) => placement.trackId === trackId ? { ...placement, trackId: fallback?.id } : placement));
+    setSelectedTrackId(fallback?.id ?? "");
+    setSelectedPlacementId(null);
+    setActivePanel("track");
+  };
+
+  const dropOnClipTrack = (event: DragEvent<HTMLDivElement>, trackId: string) => {
+    event.preventDefault();
+    const payload = event.dataTransfer.getData("application/x-scenepilot") || event.dataTransfer.getData("text/plain");
+    if (!payload) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const start = Math.min(duration - 0.05, Math.max(0, ((event.clientX - bounds.left) / bounds.width) * duration));
+    checkpoint();
+    if (payload.startsWith("placement:")) {
+      const id = payload.slice("placement:".length);
+      setPlacements((items) => items.map((placement) => {
+        if (placement.id !== id) return placement;
+        const nextStart = Math.max(0, Math.min(duration - placement.duration, start));
+        const section = sections.find((item) => nextStart >= item.start && nextStart < item.end);
+        return { ...placement, trackId, start: nextStart, sectionId: section?.id ?? placement.sectionId };
+      }));
+      setSelectedPlacementId(id);
+      setSelectedTrackId(trackId);
+      setActivePanel("clip");
+      setStatus(`Clip moved to ${clipTracks.find((track) => track.id === trackId)?.name ?? "track"} at ${formatTime(start)}.`);
+    } else if (payload.startsWith("asset:")) {
+      const assetId = payload.slice("asset:".length);
+      const section = sections.find((item) => start >= item.start && start < item.end) ?? sections[0];
+      const placement: Placement = {
+        id: `manual-${crypto.randomUUID()}`,
+        assetId,
+        sectionId: section?.id ?? "manual",
+        trackId,
+        start,
+        sourceStart: 0,
+        duration: Math.min(section?.duration ?? 0.5, duration - start),
+        scale: section?.scale ?? 112,
+        opacity: 100,
+      };
+      setPlacements((items) => [...items, placement].sort((a, b) => a.start - b.start));
+      setSelectedPlacementId(placement.id);
+      setSelectedTrackId(trackId);
+      setActivePanel("clip");
+      setStatus(`Media placed on ${clipTracks.find((track) => track.id === trackId)?.name ?? "track"} at ${formatTime(start)}.`);
+    }
+    setDraggingPlacementId(null);
   };
 
   const applyBeatGrid = (nextBpm: number, nextOffset: number) => {
@@ -577,6 +696,7 @@ export default function Home() {
         effectProfiles: analysis.effects,
       } : null,
       sections,
+      tracks: clipTracks,
       assets: assets.map(({ id, name, kind }) => ({ id, name, kind })),
       placements,
     };
@@ -594,7 +714,7 @@ export default function Home() {
       return;
     }
     try {
-      await saveProject<SectionRule, Placement>({
+      await saveProject<SectionRule, Placement, ClipTrack>({
         mainFile,
         assets: assets.map(({ id, name, file, kind, color }) => ({ id, name, file, kind, color })),
         duration,
@@ -603,6 +723,7 @@ export default function Home() {
         beats,
         sections,
         placements,
+        tracks: clipTracks,
         analysis,
         autoEnergy,
         savedAt: Date.now(),
@@ -616,7 +737,7 @@ export default function Home() {
   const restoreCurrentProject = async () => {
     if (analyzing || rendering) return;
     try {
-      const stored = await loadProject<SectionRule, Placement>();
+      const stored = await loadProject<SectionRule, Placement, ClipTrack>();
       if (!stored) {
         setStatus("No saved ScenePilot project was found in this browser.");
         return;
@@ -639,11 +760,14 @@ export default function Home() {
         pattern: section.pattern ?? suggestDirectorPattern({ name: section.name, energy: section.energy ?? 0.5 }, index, stored.sections.length),
       }));
       setSections(restoredSections);
-      setPlacements(stored.placements);
+      const restoredTracks = stored.tracks?.length ? stored.tracks : initialClipTracks;
+      setClipTracks(restoredTracks);
+      setPlacements(stored.placements.map((placement, index) => ({ ...placement, trackId: placement.trackId ?? restoredTracks[index % restoredTracks.length].id })));
       setAnalysis(stored.analysis);
       setAutoEnergy(stored.autoEnergy);
       setSelectedSectionId(restoredSections[0]?.id ?? "");
       setSelectedPlacementId(null);
+      setSelectedTrackId(restoredTracks[0].id);
       setCurrentTime(0);
       historyRef.current = [];
       futureRef.current = [];
@@ -669,6 +793,7 @@ export default function Home() {
         mainFile,
         assets: assets.map(({ id, file, kind }) => ({ id, file, kind })),
         placements,
+        tracks: clipTracks,
         duration,
         signal: controller.signal,
         onProgress: (progress, message) => {
@@ -759,10 +884,10 @@ export default function Home() {
               {mainUrl ? mainIsAudio ? (
                 <>
                   <div className="audio-source-canvas"><Music2 size={34} /><strong>{mainName}</strong><div>{energyBars.slice(0, 54).map((height, index) => <i key={index} style={{ height: `${Math.max(12, height)}%` }} />)}</div></div>
-                  <audio ref={videoRef} src={mainUrl} preload="metadata" />
+                  <audio ref={(node) => { videoRef.current = node; }} src={mainUrl} preload="metadata" />
                 </>
               ) : (
-                <video ref={videoRef} src={mainUrl} playsInline preload="metadata" />
+                <video ref={(node) => { videoRef.current = node; }} src={mainUrl} playsInline preload="metadata" />
               ) : (
                 <button className="auto-preview-empty" onClick={() => mainInputRef.current?.click()}>
                   <Film size={42} />
@@ -772,7 +897,8 @@ export default function Home() {
               )}
               {activePlacements.map((placement) => {
                 const asset = assets.find((item) => item.id === placement.assetId);
-                return asset ? <EffectLayer key={placement.id} asset={asset} placement={placement} currentTime={currentTime} playing={playing} /> : null;
+                const track = clipTracks.find((item) => item.id === (placement.trackId ?? clipTracks[0]?.id));
+                return asset && track ? <EffectLayer key={placement.id} asset={asset} placement={placement} track={track} currentTime={currentTime} playing={playing} /> : null;
               })}
               <div className="auto-preview-status"><span className={placements.length ? "ready" : ""} />{placements.length ? `${placements.length} HITS READY` : "WAITING FOR MEDIA"}</div>
               <button className="auto-preview-play" onClick={togglePlayback} aria-label={playing ? "Pause" : "Play"}>{playing ? <Pause size={19} fill="currentColor" /> : <Play size={19} fill="currentColor" />}</button>
@@ -840,10 +966,10 @@ export default function Home() {
             {mainUrl ? mainIsAudio ? (
               <>
                 <div className="audio-source-canvas"><Music2 size={34} /><strong>{mainName}</strong><div>{energyBars.slice(0, 54).map((height, index) => <i key={index} style={{ height: `${Math.max(12, height)}%` }} />)}</div></div>
-                <audio ref={videoRef} src={mainUrl} preload="metadata" />
+                <audio ref={(node) => { videoRef.current = node; }} src={mainUrl} preload="metadata" />
               </>
             ) : (
-              <video ref={videoRef} src={mainUrl} playsInline preload="metadata" />
+              <video ref={(node) => { videoRef.current = node; }} src={mainUrl} playsInline preload="metadata" />
             ) : (
               <div className="empty-monitor">
                 <div className="empty-reel"><Film size={36} /></div>
@@ -854,7 +980,8 @@ export default function Home() {
             )}
             {activePlacements.map((placement) => {
               const asset = assets.find((item) => item.id === placement.assetId);
-              return asset ? <EffectLayer key={placement.id} asset={asset} placement={placement} currentTime={currentTime} playing={playing} /> : null;
+              const track = clipTracks.find((item) => item.id === (placement.trackId ?? clipTracks[0]?.id));
+              return asset && track ? <EffectLayer key={placement.id} asset={asset} placement={placement} track={track} currentTime={currentTime} playing={playing} /> : null;
             })}
             <div className="monitor-badge"><Activity size={13} /> {mainUrl ? "LIVE PREVIEW" : "LOCAL ENGINE READY"}</div>
             <input ref={mainInputRef} hidden type="file" accept="video/*,audio/*" onChange={(event) => loadMainMedia(event.target.files?.[0])} />
@@ -899,7 +1026,7 @@ export default function Home() {
 
           <div className="asset-bin">
             {assets.length ? assets.map((asset) => (
-              <div className="asset-row" key={asset.id}>
+              <div className="asset-row" key={asset.id} draggable title="Drag onto a clip track" onDragStart={(event) => { event.dataTransfer.effectAllowed = "copy"; event.dataTransfer.setData("application/x-scenepilot", `asset:${asset.id}`); }}>
                 <div className="asset-thumb" style={{ borderColor: asset.color }}>
                   {asset.kind === "image" ? <img src={asset.url} alt="" /> : <video src={asset.url} muted />}
                   <span>{asset.kind === "image" ? <ImageIcon size={12} /> : <Video size={12} />}</span>
@@ -917,6 +1044,7 @@ export default function Home() {
           <div className="panel-tabs" role="tablist">
             <button className={activePanel === "section" ? "active" : ""} onClick={() => setActivePanel("section")}><Split size={14} /> Section rule</button>
             <button className={activePanel === "clip" ? "active" : ""} onClick={() => setActivePanel("clip")} disabled={!selectedPlacement}><Clapperboard size={14} /> Clip override</button>
+            <button className={activePanel === "track" ? "active" : ""} onClick={() => setActivePanel("track")} disabled={!selectedTrack}><Palette size={14} /> Track FX</button>
           </div>
 
           {activePanel === "section" && selectedSection && (
@@ -933,6 +1061,7 @@ export default function Home() {
           {activePanel === "clip" && selectedPlacement && (
             <div className="inspector">
               <div className="inspector-title"><span className="clip-swatch" /><div><strong>Placement override</strong><small>{assets.find((asset) => asset.id === selectedPlacement.assetId)?.name}</small></div></div>
+              <label className="field"><span>Clip track</span><select className="director-select" value={selectedPlacement.trackId ?? clipTracks[0]?.id} onChange={(event) => { setSelectedTrackId(event.target.value); updatePlacement({ trackId: event.target.value }); }}>{clipTracks.map((track) => <option key={track.id} value={track.id}>{track.name}</option>)}</select></label>
               <label className="field"><span>Start time</span><div className="value-line"><input type="range" min="0" max={duration} step="0.01" value={selectedPlacement.start} onChange={(event) => updatePlacement({ start: Number(event.target.value) })} /><strong>{formatTime(selectedPlacement.start)}</strong></div></label>
               <label className="field"><span>Duration</span><div className="value-line"><input type="range" min="0.1" max="6" step="0.05" value={selectedPlacement.duration} onChange={(event) => updatePlacement({ duration: Number(event.target.value) })} /><strong>{selectedPlacement.duration.toFixed(2)}s</strong></div></label>
               <label className="field"><span>Scale</span><div className="value-line"><input type="range" min="50" max="200" value={selectedPlacement.scale} onChange={(event) => updatePlacement({ scale: Number(event.target.value) })} /><strong>{selectedPlacement.scale}%</strong></div></label>
@@ -940,16 +1069,31 @@ export default function Home() {
               <button className="delete-placement" onClick={() => { checkpoint(); setPlacements((items) => items.filter((item) => item.id !== selectedPlacement.id)); setSelectedPlacementId(null); setActivePanel("section"); }}><Trash2 size={15} /> Remove placement</button>
             </div>
           )}
+
+          {activePanel === "track" && selectedTrack && (
+            <div className="inspector track-inspector">
+              <div className="inspector-title"><span style={{ background: selectedTrack.color }} /><div><strong>{selectedTrack.name}</strong><small>{placements.filter((placement) => (placement.trackId ?? clipTracks[0]?.id) === selectedTrack.id).length} clips share this stack</small></div><label className="switch"><input type="checkbox" checked={selectedTrack.enabled} onChange={(event) => updateClipTrack({ enabled: event.target.checked })} /><i /></label></div>
+              <label className="field"><span>Track name</span><input className="track-name-input" value={selectedTrack.name} maxLength={28} onChange={(event) => updateClipTrack({ name: event.target.value.toUpperCase() })} /></label>
+              <label className="field"><span>Blend mode</span><select className="director-select" value={selectedTrack.blend} onChange={(event) => updateClipTrack({ blend: event.target.value as ClipTrack["blend"] })}><option value="screen">Screen</option><option value="overlay">Overlay</option><option value="normal">Normal</option><option value="multiply">Multiply</option></select></label>
+              <label className="field"><span>Track opacity</span><div className="value-line"><input type="range" min="0" max="100" value={selectedTrack.opacity} onChange={(event) => updateClipTrack({ opacity: Number(event.target.value) })} /><strong>{selectedTrack.opacity}%</strong></div></label>
+              <label className="field"><span>Hue shift</span><div className="value-line"><input type="range" min="-180" max="180" value={selectedTrack.hue} onChange={(event) => updateClipTrack({ hue: Number(event.target.value) })} /><strong>{selectedTrack.hue}°</strong></div></label>
+              <label className="field"><span>Color intensity</span><div className="value-line"><input type="range" min="0" max="220" value={selectedTrack.saturation} onChange={(event) => updateClipTrack({ saturation: Number(event.target.value) })} /><strong>{selectedTrack.saturation}%</strong></div></label>
+              <label className="field"><span>Brightness</span><div className="value-line"><input type="range" min="20" max="200" value={selectedTrack.brightness} onChange={(event) => updateClipTrack({ brightness: Number(event.target.value) })} /><strong>{selectedTrack.brightness}%</strong></div></label>
+              <label className="field"><span>Glow</span><div className="value-line"><input type="range" min="0" max="60" value={selectedTrack.glow} onChange={(event) => updateClipTrack({ glow: Number(event.target.value) })} /><strong>{selectedTrack.glow}px</strong></div></label>
+              <div className="fade-fields"><label className="field"><span>Fade in</span><div className="value-line"><input type="range" min="0" max="2" step="0.01" value={selectedTrack.fadeIn} onChange={(event) => updateClipTrack({ fadeIn: Number(event.target.value) })} /><strong>{selectedTrack.fadeIn.toFixed(2)}s</strong></div></label><label className="field"><span>Fade out</span><div className="value-line"><input type="range" min="0" max="2" step="0.01" value={selectedTrack.fadeOut} onChange={(event) => updateClipTrack({ fadeOut: Number(event.target.value) })} /><strong>{selectedTrack.fadeOut.toFixed(2)}s</strong></div></label></div>
+              <button className="delete-placement" disabled={clipTracks.length <= 1} onClick={() => removeClipTrack(selectedTrack.id)}><Trash2 size={15} /> Remove clip track</button>
+            </div>
+          )}
         </aside>
       </section>
 
       <section className="timeline-wrap">
         <div className="timeline-toolbar">
-          <div><Settings2 size={15} /><strong>Cut map</strong><span>Click a section or effect to tune it</span></div>
-          <div className="timeline-legend"><span><i className="beat-legend" />Beat</span><span><i className="fx-legend" />Effect</span><span><i className="scene-legend" />Section</span></div>
+          <div><Settings2 size={15} /><strong>Arrangement</strong><span>{clipTracks.length} clip tracks · layered compositing</span></div>
+          <div className="timeline-legend"><span><i className="beat-legend" />Beat</span><span><i className="fx-legend" />Clip</span><span><i className="scene-legend" />Section</span><button className="track-add-button" onClick={addClipTrack}><Plus size={14} /> Add track</button></div>
         </div>
         <div className="timeline-scroll">
-          <div className="timeline" style={{ minWidth: Math.max(980, duration * 7) }}>
+          <div className="timeline" style={{ minWidth: Math.max(980, duration * 7), height: 211 + clipTracks.length * 60 }}>
             <div className="section-lane">
               <div className="track-label"><Split size={15} /><span>SECTIONS</span></div>
               <div className="track-content">
@@ -970,15 +1114,20 @@ export default function Home() {
               <div className="track-label">{mainIsAudio ? <Music2 size={15} /> : <Film size={15} />}<span>{mainIsAudio ? "SOURCE AUDIO" : "MAIN VIDEO"}</span></div>
               <div className="track-content"><div className="main-clip"><div className="clip-stripes" /><strong>{mainName}</strong><span>{formatTime(duration)}</span></div></div>
             </div>
-            <div className="effects-lane">
-              <div className="track-label"><Sparkles size={15} /><span>EFFECTS</span></div>
-              <div className="track-content">
-                {placements.map((placement) => {
-                  const asset = assets.find((item) => item.id === placement.assetId);
-                  return <button key={placement.id} className={`effect-block ${placement.id === selectedPlacementId ? "selected" : ""}`} style={{ left: `${(placement.start / duration) * 100}%`, width: `${Math.max(0.38, (placement.duration / duration) * 100)}%`, background: asset?.color ?? COLORS[0] }} title={`${asset?.name} · ${placement.duration.toFixed(2)}s · ${placement.scale}%`} onClick={() => { setSelectedPlacementId(placement.id); setSelectedSectionId(placement.sectionId); setActivePanel("clip"); seek(placement.start); }} />;
-                })}
+            {clipTracks.map((track) => (
+              <div className={`clip-track-lane ${track.enabled ? "" : "disabled"}`} key={track.id}>
+                <div className={`track-label clip-track-label ${selectedTrack?.id === track.id ? "selected" : ""}`} style={{ borderLeftColor: track.color }}>
+                  <button onClick={() => { setSelectedTrackId(track.id); setSelectedPlacementId(null); setActivePanel("track"); }}><Layers3 size={14} /><span>{track.name}</span><small>{track.blend} · {track.opacity}%</small></button>
+                  {clipTracks.length > 1 && <button className="track-remove" onClick={() => removeClipTrack(track.id)} aria-label={`Remove ${track.name}`} title="Remove track"><X size={12} /></button>}
+                </div>
+                <div className="track-content clip-drop-zone" onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = draggingPlacementId ? "move" : "copy"; }} onDrop={(event) => dropOnClipTrack(event, track.id)}>
+                  {placements.filter((placement) => (placement.trackId ?? clipTracks[0]?.id) === track.id).map((placement) => {
+                    const asset = assets.find((item) => item.id === placement.assetId);
+                    return <button draggable key={placement.id} className={`effect-block ${placement.id === selectedPlacementId ? "selected" : ""} ${placement.id === draggingPlacementId ? "dragging" : ""}`} style={{ left: `${(placement.start / duration) * 100}%`, width: `${Math.max(0.38, (placement.duration / duration) * 100)}%`, background: asset?.color ?? track.color }} title={`${asset?.name} · ${formatTime(placement.start)} · ${placement.duration.toFixed(2)}s`} onDragStart={(event) => { setDraggingPlacementId(placement.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-scenepilot", `placement:${placement.id}`); }} onDragEnd={() => setDraggingPlacementId(null)} onClick={() => { setSelectedPlacementId(placement.id); setSelectedTrackId(track.id); setSelectedSectionId(placement.sectionId); setActivePanel("clip"); seek(placement.start); }}><span>{asset?.name.slice(0, 12)}</span></button>;
+                  })}
+                </div>
               </div>
-            </div>
+            ))}
             <div className="energy-lane">
               <div className="track-label"><Zap size={15} /><span>ENERGY</span></div>
               <div className="track-content"><div className={`waveform ${analysis ? "measured" : ""}`}>{energyBars.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div></div>
