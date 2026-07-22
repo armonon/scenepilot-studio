@@ -7,7 +7,7 @@
   "main": "main.js",
   "type": "module",
   "build": {
-    "appId": "studio.scenepilot.app",
+    "appId": "com.armonon.scenepilot",
     "productName": "ScenePilot",
     "electronVersion": "43.2.0",
     "artifactName": "ScenePilot-${version}-${arch}.${ext}",

@@ -13,7 +13,7 @@ const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 let updateDownloadActive = false;
 
 app.setName("ScenePilot");
-app.setAppUserModelId("studio.scenepilot.app");
+app.setAppUserModelId("com.armonon.scenepilot");
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
 function compareVersions(left, right) {
