@@ -343,8 +343,11 @@ async function analyzeFootage(file: File, duration: number, report: (value: Anal
       let frame = 0;
       for (let time = 0; time < duration; time += fallbackInterval) {
         checkAborted(signal);
-        video.currentTime = Math.min(time, Math.max(0, duration - 0.05));
-        await waitForMedia(video, "seeked", signal);
+        const targetTime = Math.min(time, Math.max(0, duration - 0.05));
+        if (Math.abs(video.currentTime - targetTime) > 0.01) {
+          video.currentTime = targetTime;
+          await waitForMedia(video, "seeked", signal);
+        }
         context.drawImage(video, 0, 0, canvas.width, canvas.height);
         capture(time);
         frame++;

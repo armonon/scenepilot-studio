@@ -32,7 +32,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { DragEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { analyzeProject, buildDirectedPlacements, suggestDirectorPattern } from "../lib/analysis-engine";
 import type { AnalysisProgress, AnalysisResult, DirectorPattern, RhythmRate } from "../lib/analysis-engine";
 import { renderProject } from "../lib/render-engine";
@@ -113,6 +113,7 @@ function formatTime(seconds: number) {
 
 function formatWait(seconds: number) {
   if (!Number.isFinite(seconds) || seconds < 0) return "estimating";
+  if (seconds < 1) return "<1s";
   if (seconds < 60) return `${Math.max(1, Math.round(seconds))}s`;
   return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
 }
@@ -206,6 +207,8 @@ export default function Home() {
   const analysisAbortRef = useRef<AbortController | null>(null);
   const renderAbortRef = useRef<AbortController | null>(null);
   const analysisRunRef = useRef(0);
+  const sourceLoadRef = useRef(0);
+  const pendingSourceUrlRef = useRef("");
   const analysisStartedRef = useRef(0);
   const urlsRef = useRef<string[]>([]);
   const historyRef = useRef<EditSnapshot[]>([]);
@@ -275,6 +278,7 @@ export default function Home() {
   useEffect(() => () => {
     analysisAbortRef.current?.abort();
     renderAbortRef.current?.abort();
+    if (pendingSourceUrlRef.current) URL.revokeObjectURL(pendingSourceUrlRef.current);
     urlsRef.current.forEach((url) => URL.revokeObjectURL(url));
   }, []);
 
@@ -338,13 +342,27 @@ export default function Home() {
   const loadMainMedia = (file?: File) => {
     if (!file || (!file.type.startsWith("video/") && !file.type.startsWith("audio/")) || analyzing || rendering) return;
     analysisAbortRef.current?.abort();
-    if (mainUrl) URL.revokeObjectURL(mainUrl);
+    const load = ++sourceLoadRef.current;
+    const previousUrl = mainUrl;
+    if (pendingSourceUrlRef.current) URL.revokeObjectURL(pendingSourceUrlRef.current);
     const url = URL.createObjectURL(file);
+    pendingSourceUrlRef.current = url;
     const probe = document.createElement(file.type.startsWith("audio/") ? "audio" : "video");
     probe.preload = "metadata";
     probe.src = url;
+    setStatus(`Reading ${file.name}...`);
     probe.onloadedmetadata = () => {
-      const nextDuration = Number.isFinite(probe.duration) ? probe.duration : 180;
+      if (load !== sourceLoadRef.current) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      pendingSourceUrlRef.current = "";
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
+      const nextDuration = Number.isFinite(probe.duration) && probe.duration > 0 ? probe.duration : 180;
+      setPlaying(false);
+      setMainFile(file);
+      setMainUrl(url);
+      setMainName(file.name);
       setDuration(nextDuration);
       setSections(buildSections(nextDuration));
       setCurrentTime(0);
@@ -354,10 +372,26 @@ export default function Home() {
       setStatus(file.type.startsWith("audio/")
         ? "Song ready. The engine will map its beats, energy, and musical sections."
         : "Source ready. The engine will inspect its audio and visual frames.");
+      probe.onloadedmetadata = null;
+      probe.onerror = null;
+      probe.removeAttribute("src");
+      probe.load();
     };
-    setMainFile(file);
-    setMainUrl(url);
-    setMainName(file.name);
+    probe.onerror = () => {
+      URL.revokeObjectURL(url);
+      if (pendingSourceUrlRef.current === url) pendingSourceUrlRef.current = "";
+      if (load === sourceLoadRef.current) setStatus(`Could not read ${file.name}. Try a standard MP4, WAV, MP3, or M4A file.`);
+    };
+  };
+
+  const selectMainMedia = (event: ChangeEvent<HTMLInputElement>) => {
+    loadMainMedia(event.currentTarget.files?.[0]);
+    event.currentTarget.value = "";
+  };
+
+  const selectAssets = (event: ChangeEvent<HTMLInputElement>) => {
+    if (event.currentTarget.files) addAssets(event.currentTarget.files);
+    event.currentTarget.value = "";
   };
 
   const addAssets = (files: FileList | File[]) => {
@@ -396,11 +430,6 @@ export default function Home() {
     if (!mainFile) {
       setStatus("Add a source video or song first so ScenePilot can inspect it.");
       mainInputRef.current?.click();
-      return;
-    }
-    if (!assets.length) {
-      setStatus("Add at least one effect so ScenePilot can inspect its visual peak.");
-      assetInputRef.current?.click();
       return;
     }
     analysisAbortRef.current?.abort();
@@ -764,7 +793,7 @@ export default function Home() {
       setClipTracks(restoredTracks);
       setPlacements(stored.placements.map((placement, index) => ({ ...placement, trackId: placement.trackId ?? restoredTracks[index % restoredTracks.length].id })));
       setAnalysis(stored.analysis);
-      setAutoEnergy(stored.autoEnergy);
+      setAutoEnergy(stored.autoEnergy ?? "dynamic");
       setSelectedSectionId(restoredSections[0]?.id ?? "");
       setSelectedPlacementId(null);
       setSelectedTrackId(restoredTracks[0].id);
@@ -917,8 +946,8 @@ export default function Home() {
                   {assets.length > 0 && <i>READY</i>}
                 </button>
               </div>
-              <input ref={mainInputRef} disabled={analyzing || rendering} hidden type="file" accept="video/*,audio/*" onChange={(event) => loadMainMedia(event.target.files?.[0])} />
-              <input ref={assetInputRef} disabled={analyzing || rendering} hidden type="file" multiple accept="image/*,video/*" onChange={(event) => event.target.files && addAssets(event.target.files)} />
+              <input ref={mainInputRef} disabled={analyzing || rendering} hidden type="file" accept="video/*,audio/*" onChange={selectMainMedia} />
+              <input ref={assetInputRef} disabled={analyzing || rendering} hidden type="file" multiple accept="image/*,video/*" onChange={selectAssets} />
 
               <div className="energy-control">
                 <div><small>03 / ENERGY</small><strong>How hard should it hit?</strong></div>
@@ -984,7 +1013,7 @@ export default function Home() {
               return asset && track ? <EffectLayer key={placement.id} asset={asset} placement={placement} track={track} currentTime={currentTime} playing={playing} /> : null;
             })}
             <div className="monitor-badge"><Activity size={13} /> {mainUrl ? "LIVE PREVIEW" : "LOCAL ENGINE READY"}</div>
-            <input ref={mainInputRef} hidden type="file" accept="video/*,audio/*" onChange={(event) => loadMainMedia(event.target.files?.[0])} />
+            <input ref={mainInputRef} hidden type="file" accept="video/*,audio/*" onChange={selectMainMedia} />
           </div>
 
           <div className="transport">
@@ -1021,7 +1050,7 @@ export default function Home() {
           <div className="panel-head">
             <div><Sparkles size={16} /><strong>Effect bin</strong><span>{assets.length} loaded</span></div>
             <button className="add-button" disabled={analyzing || rendering} onClick={() => assetInputRef.current?.click()}><Plus size={16} /> Add media</button>
-            <input ref={assetInputRef} disabled={analyzing || rendering} hidden type="file" multiple accept="image/*,video/*" onChange={(event) => event.target.files && addAssets(event.target.files)} />
+            <input ref={assetInputRef} disabled={analyzing || rendering} hidden type="file" multiple accept="image/*,video/*" onChange={selectAssets} />
           </div>
 
           <div className="asset-bin">

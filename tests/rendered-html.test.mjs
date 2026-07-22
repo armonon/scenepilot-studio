@@ -47,6 +47,8 @@ test("keeps the analysis, render, and persistence engines connected", async () =
   assert.match(page, /accept="video\/\*,audio\/\*"/);
   assert.match(page, /analysis-dock-track/);
   assert.match(page, /formatWait\(analysisEta\)/);
+  assert.match(page, /event\.currentTarget\.value = ""/);
+  assert.match(page, /pendingSourceUrlRef/);
   assert.match(page, /type ClipTrack =/);
   assert.match(page, /dropOnClipTrack/);
   assert.match(page, /clip-track-lane/);
