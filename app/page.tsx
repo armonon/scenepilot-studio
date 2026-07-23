@@ -35,7 +35,7 @@ import {
   Zap,
 } from "lucide-react";
 import { ChangeEvent, DragEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { analyzeProject, buildDirectedPlacements, hasReliableRhythm, suggestDirectorPattern } from "../lib/analysis-engine";
+import { analyzeProject, buildDirectedPlacements, hasReliableRhythm, mergeDirectedSectionPlacements, suggestDirectorPattern } from "../lib/analysis-engine";
 import type { AnalysisProgress, AnalysisResult, DirectorPattern, RhythmRate } from "../lib/analysis-engine";
 import { renderProject } from "../lib/render-engine";
 import type { RenderOptions } from "../lib/render-engine";
@@ -253,6 +253,7 @@ export default function Home() {
   const selectedSection = sections.find((item) => item.id === selectedSectionId) ?? sections[0];
   const selectedPlacement = placements.find((item) => item.id === selectedPlacementId) ?? null;
   const selectedTrack = clipTracks.find((item) => item.id === (selectedPlacement?.trackId ?? selectedTrackId)) ?? clipTracks[0];
+  const selectedSectionHitCount = selectedSection ? placements.filter((item) => item.sectionId === selectedSection.id).length : 0;
   const activePlacements = placements.filter(
     (item) => currentTime >= item.start && currentTime < item.start + item.duration && clipTracks.find((track) => track.id === (item.trackId ?? clipTracks[0]?.id))?.enabled !== false,
   ).sort((a, b) => clipTracks.findIndex((track) => track.id === (a.trackId ?? clipTracks[0]?.id)) - clipTracks.findIndex((track) => track.id === (b.trackId ?? clipTracks[0]?.id)));
@@ -540,6 +541,7 @@ export default function Home() {
   };
 
   const chooseAutoEnergy = (energy: "smooth" | "dynamic" | "maximum") => {
+    if (analyzing || rendering) return;
     checkpoint();
     setAutoEnergy(energy);
     if (!analysis) return;
@@ -561,8 +563,16 @@ export default function Home() {
   };
 
   const updateSection = (patch: Partial<SectionRule>) => {
+    if (!selectedSection || analyzing || rendering) return;
     if (!continuousEditRef.current) checkpoint();
-    setSections((items) => items.map((item) => (item.id === selectedSectionId ? { ...item, ...patch } : item)));
+    const nextSections = sections.map((item) => (item.id === selectedSectionId ? { ...item, ...patch } : item));
+    setSections(nextSections);
+    if (!analysis) return;
+    const rebuiltSection = composeDirector(analysis, nextSections, beats).filter((placement) => placement.sectionId === selectedSectionId);
+    const preserveManualClips = patch.enabled !== false;
+    setPlacements((items) => mergeDirectedSectionPlacements(items, rebuiltSection, selectedSectionId, preserveManualClips));
+    setSelectedPlacementId(null);
+    setStatus(`${selectedSection.name} rebuilt with ${rebuiltSection.length} hits from the existing analysis.`);
   };
 
   const updatePlacement = (patch: Partial<Placement>) => {
@@ -984,7 +994,7 @@ export default function Home() {
             </div>
 
             <div className="auto-controls">
-              <div className="auto-media-row">
+              <div className={`auto-media-row ${analysis ? "compact" : ""}`}>
                 <button className={mainUrl ? "loaded" : ""} disabled={analyzing || rendering} onClick={() => mainInputRef.current?.click()}>
                   <div>{mainUrl ? mainIsAudio ? <Music2 size={20} /> : <Video size={20} /> : <Upload size={20} />}</div>
                   <span><small>01 / SOURCE</small><strong>{mainUrl ? mainName : "Video or song"}</strong></span>
@@ -1002,20 +1012,44 @@ export default function Home() {
               <div className="energy-control">
                 <div><small>03 / ENERGY</small><strong>How hard should it hit?</strong></div>
                 <div className="energy-options">
-                  <button className={autoEnergy === "smooth" ? "active" : ""} onClick={() => chooseAutoEnergy("smooth")}><i /><span>SMOOTH</span></button>
-                  <button className={autoEnergy === "dynamic" ? "active" : ""} onClick={() => chooseAutoEnergy("dynamic")}><i /><i /><span>DYNAMIC</span></button>
-                  <button className={autoEnergy === "maximum" ? "active" : ""} onClick={() => chooseAutoEnergy("maximum")}><i /><i /><i /><span>MAXIMUM</span></button>
+                  <button disabled={analyzing || rendering} className={autoEnergy === "smooth" ? "active" : ""} onClick={() => chooseAutoEnergy("smooth")}><i /><span>SMOOTH</span></button>
+                  <button disabled={analyzing || rendering} className={autoEnergy === "dynamic" ? "active" : ""} onClick={() => chooseAutoEnergy("dynamic")}><i /><i /><span>DYNAMIC</span></button>
+                  <button disabled={analyzing || rendering} className={autoEnergy === "maximum" ? "active" : ""} onClick={() => chooseAutoEnergy("maximum")}><i /><i /><i /><span>MAXIMUM</span></button>
                 </div>
               </div>
 
-              <div className="director-strip">
+              {!analysis && <div className="director-strip">
                 <div><small>04 / AUTO DIRECTOR</small><strong>{analysis ? `${sections.length} musical sections shaped` : "Builds an intentional section arc"}</strong></div>
                 <span>{analysis ? directorArc : "RESTRAINT  /  PULSE  /  BUILD  /  BURST  /  RELEASE"}</span>
-              </div>
+              </div>}
+
+              {analysis && selectedSection && (
+                <div className="auto-refine">
+                  <div className="auto-refine-head">
+                    <div><Settings2 size={15} /><span><small>05 / REFINE CUT</small><strong>{selectedSection.name} · {selectedSectionHitCount} hits</strong></span></div>
+                    <label className="switch" title="Enable this section"><input type="checkbox" disabled={analyzing || rendering} checked={selectedSection.enabled} onChange={(event) => updateSection({ enabled: event.target.checked })} /><i /></label>
+                  </div>
+                  <div className="auto-section-tabs" aria-label="Choose a musical section">
+                    {sections.map((section) => <button disabled={analyzing || rendering} key={section.id} className={section.id === selectedSection.id ? "active" : ""} style={{ borderTopColor: section.color }} onClick={() => setSelectedSectionId(section.id)}><span>{section.name}</span><small>{placements.filter((placement) => placement.sectionId === section.id).length}</small></button>)}
+                  </div>
+                  <div className="auto-refine-grid">
+                    <label className="auto-refine-field"><span>Pattern</span><select value={selectedSection.pattern} disabled={analyzing || rendering} onChange={(event) => updateSection({ pattern: event.target.value as DirectorPattern })}><option value="restrained">Restrained</option><option value="pulse">Pulse</option><option value="build">Build</option><option value="burst">Burst</option><option value="release">Release</option></select></label>
+                    <div className="auto-refine-field"><span>Beat rate</span><div className="auto-rhythm-options">{(["half", "normal", "double"] as const).map((rate) => <button disabled={analyzing || rendering} key={rate} className={selectedSection.rhythm === rate ? "active" : ""} onClick={() => updateSection({ rhythm: rate })}>{rate === "half" ? "½×" : rate === "double" ? "2×" : "1×"}</button>)}</div></div>
+                    <label className="auto-refine-field"><span>Duration</span><div className="auto-value-line"><input disabled={analyzing || rendering} type="range" {...continuousEditHandlers} min="0.1" max="4" step="0.05" value={selectedSection.duration} onChange={(event) => updateSection({ duration: Number(event.target.value) })} /><strong>{selectedSection.duration.toFixed(2)}s</strong></div></label>
+                    <label className="auto-refine-field"><span>Scale</span><div className="auto-value-line"><input disabled={analyzing || rendering} type="range" {...continuousEditHandlers} min="50" max="180" value={selectedSection.scale} onChange={(event) => updateSection({ scale: Number(event.target.value) })} /><strong>{selectedSection.scale}%</strong></div></label>
+                  </div>
+                  <div className="auto-grid-tune">
+                    <span><Clock3 size={13} /><strong>{bpm}</strong> BPM</span>
+                    <div className="auto-bpm-stepper"><button disabled={analyzing || rendering} onClick={() => applyBeatGrid(bpm - 1, beatOffset)} aria-label="Decrease BPM">−</button><button disabled={analyzing || rendering} onClick={() => applyBeatGrid(bpm + 1, beatOffset)} aria-label="Increase BPM">+</button></div>
+                    <label><span>NUDGE</span><input disabled={analyzing || rendering} type="range" {...continuousEditHandlers} min="-0.5" max="0.5" step="0.005" value={beatOffset} onChange={(event) => applyBeatGrid(bpm, Number(event.target.value))} /><strong>{beatOffset >= 0 ? "+" : ""}{Math.round(beatOffset * 1000)}ms</strong></label>
+                    <button className="auto-grid-reset" disabled={analyzing || rendering} onClick={resetBeatGrid} aria-label="Restore analyzed beat grid" title="Restore analyzed beat grid"><RefreshCw size={14} /></button>
+                  </div>
+                </div>
+              )}
 
               <button className="auto-cut-button" onClick={analyzing ? () => analysisAbortRef.current?.abort() : runAutoCut} disabled={rendering}>
                 {analyzing ? <Activity size={19} /> : <WandSparkles size={19} />}
-                <span>{analyzing ? "CANCEL ANALYSIS" : placements.length ? "REMIX THE CUT" : "MAKE THE CUT"}</span>
+                <span>{analyzing ? "CANCEL ANALYSIS" : analysis ? "RE-ANALYZE MEDIA" : "MAKE THE CUT"}</span>
               </button>
 
               {rendering && <div className="render-progress"><i style={{ width: `${renderProgress * 100}%` }} /><span>{Math.round(renderProgress * 100)}%</span><button onClick={() => renderAbortRef.current?.abort()}>Cancel render</button></div>}

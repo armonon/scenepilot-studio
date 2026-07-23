@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDirectedPlacements, hasReliableRhythm } from "../lib/analysis-engine.ts";
+import { buildDirectedPlacements, hasReliableRhythm, mergeDirectedSectionPlacements } from "../lib/analysis-engine.ts";
 
 const sections = [
   { id: "open", name: "OPEN", start: 0, end: 10, energy: 0.2, rhythm: "half", pattern: "restrained" },
@@ -76,4 +76,22 @@ test("section duration and scale overrides apply on every director rebuild", () 
 test("low-confidence rhythm is not treated as safe for automatic cuts", () => {
   assert.equal(hasReliableRhythm({ ...result, confidence: 0 }), false);
   assert.equal(hasReliableRhythm(result), true);
+});
+
+test("section refinements replace generated hits without erasing deliberate clips", () => {
+  const current = [
+    { id: "directed-verse-old", sectionId: "verse", start: 8 },
+    { id: "manual-kept", sectionId: "verse", start: 9 },
+    { id: "directed-chorus", sectionId: "chorus", start: 24 },
+  ];
+  const rebuilt = [{ id: "directed-verse-new", sectionId: "verse", start: 10 }];
+
+  assert.deepEqual(
+    mergeDirectedSectionPlacements(current, rebuilt, "verse").map(({ id }) => id),
+    ["manual-kept", "directed-verse-new", "directed-chorus"],
+  );
+  assert.deepEqual(
+    mergeDirectedSectionPlacements(current, [], "verse", false).map(({ id }) => id),
+    ["directed-chorus"],
+  );
 });

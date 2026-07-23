@@ -73,6 +73,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--cyan); outl
 .auto-preview-play { position: absolute; left: 16px; bottom: 16px; z-index: 4; width: 42px; height: 42px; border-radius: 50%; border: 1px solid #4a5753; background: #121917e8; display: grid; place-items: center; cursor: pointer; }
 .auto-controls { padding: 18px; display: flex; flex-direction: column; gap: 15px; }
 .auto-media-row { display: grid; gap: 8px; }
+.auto-media-row.compact { grid-template-columns: 1fr 1fr; }
+.auto-media-row.compact > button { grid-template-columns: 38px minmax(0, 1fr); }
+.auto-media-row.compact > button > i { display: none; }
 .auto-media-row > button { height: 68px; border: 1px solid #35403d; background: #171d1b; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 0 12px; text-align: left; cursor: pointer; }
 .auto-media-row > button:hover { border-color: #5d6a66; }
 .auto-media-row > button.loaded { border-color: #34746d; background: #14201e; }
@@ -98,6 +101,43 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--cyan); outl
 .director-strip small { color: var(--coral); font: 8px var(--font-geist-mono); }
 .director-strip strong { font-size: 9px; color: #dce2df; }
 .director-strip > span { color: #89938f; font: 8px var(--font-geist-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.auto-refine { border: 1px solid #3a4642; background: #0d1211; }
+.auto-refine-head { min-height: 44px; padding: 8px 10px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid #303936; }
+.auto-refine-head > div { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.auto-refine-head svg { color: var(--cyan); flex: 0 0 auto; }
+.auto-refine-head span { min-width: 0; }
+.auto-refine-head small, .auto-refine-head strong { display: block; }
+.auto-refine-head small { color: var(--cyan); font: 8px var(--font-geist-mono); }
+.auto-refine-head strong { margin-top: 3px; font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.auto-section-tabs { display: flex; min-width: 0; overflow-x: auto; border-bottom: 1px solid #303936; scrollbar-width: thin; }
+.auto-section-tabs button { flex: 1 0 58px; min-width: 0; height: 42px; padding: 5px 6px; border: 0; border-top: 2px solid; border-right: 1px solid #303936; background: #141a18; color: #87918e; cursor: pointer; overflow: hidden; }
+.auto-section-tabs button:last-child { border-right: 0; }
+.auto-section-tabs button.active { background: #23302d; color: #fff; box-shadow: inset 0 -2px var(--cyan); }
+.auto-section-tabs span, .auto-section-tabs small { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.auto-section-tabs span { font-size: 7px; font-weight: 800; }
+.auto-section-tabs small { margin-top: 3px; color: var(--lime); font: 8px var(--font-geist-mono); }
+.auto-refine-grid { padding: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.auto-refine-field { min-width: 0; display: block; }
+.auto-refine-field > span { display: block; margin-bottom: 5px; color: #87918e; font: 7px var(--font-geist-mono); text-transform: uppercase; }
+.auto-refine-field select { width: 100%; height: 30px; padding: 0 7px; border: 1px solid #394441; background: #171d1b; color: #e4e9e6; font: 9px var(--font-geist-mono); }
+.auto-rhythm-options { height: 30px; display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid #394441; }
+.auto-rhythm-options button { min-width: 0; border: 0; border-right: 1px solid #394441; background: #171d1b; color: #7f8986; font: 9px var(--font-geist-mono); cursor: pointer; }
+.auto-rhythm-options button:last-child { border-right: 0; }
+.auto-rhythm-options button.active { background: var(--cyan); color: #071411; }
+.auto-value-line { height: 30px; display: flex; align-items: center; gap: 7px; }
+.auto-value-line input { flex: 1; min-width: 0; accent-color: var(--cyan); }
+.auto-value-line strong { min-width: 42px; text-align: right; color: #e4e9e6; font: 8px var(--font-geist-mono); }
+.auto-grid-tune { min-height: 42px; padding: 7px 10px; display: grid; grid-template-columns: auto auto minmax(100px, 1fr) 28px; align-items: center; gap: 7px; border-top: 1px solid #303936; }
+.auto-grid-tune > span { display: flex; align-items: center; gap: 4px; color: #8d9794; font: 7px var(--font-geist-mono); white-space: nowrap; }
+.auto-grid-tune > span svg { color: var(--coral); }
+.auto-grid-tune > span strong { color: #fff; font-size: 9px; }
+.auto-bpm-stepper { display: flex; }
+.auto-bpm-stepper button, .auto-grid-reset { width: 26px; height: 26px; border: 1px solid #3a4542; background: #171d1b; color: #dfe4e1; display: grid; place-items: center; cursor: pointer; }
+.auto-bpm-stepper button + button { border-left: 0; }
+.auto-grid-tune > label { min-width: 0; display: grid; grid-template-columns: auto minmax(46px, 1fr) 42px; align-items: center; gap: 5px; color: #7f8986; font: 7px var(--font-geist-mono); }
+.auto-grid-tune > label input { min-width: 0; width: 100%; accent-color: var(--coral); }
+.auto-grid-tune > label strong { text-align: right; color: #dfe4e1; font-size: 8px; }
+.auto-refine button:disabled, .auto-refine input:disabled, .auto-refine select:disabled, .energy-options button:disabled { opacity: .45; cursor: not-allowed; }
 .render-progress { min-height: 34px; position: relative; overflow: hidden; border: 1px solid #33403c; background: #0b100f; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; }
 .render-progress > i { position: absolute; inset: 0 auto 0 0; background: #34d6c71f; border-right: 1px solid var(--cyan); transition: width 180ms linear; }
 .render-progress span, .render-progress button { position: relative; z-index: 1; font: 9px var(--font-geist-mono); }
@@ -320,6 +360,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--cyan); outl
   .energy-control strong { display: block; margin-top: 4px; }
   .director-strip > div { display: block; }
   .director-strip strong { display: block; margin-top: 4px; }
+  .auto-grid-tune { grid-template-columns: auto auto 1fr 28px; }
+  .auto-grid-tune > label { grid-column: 1 / -1; grid-row: 2; }
+  .auto-grid-reset { grid-column: 4; grid-row: 1; }
   .auto-readout p { flex-basis: 100%; order: 2; }
   .mode-dock > div { display: none; }
   .mode-dock { justify-content: center; min-height: 62px; }

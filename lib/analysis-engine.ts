@@ -261,6 +261,18 @@ export function hasReliableRhythm(result: Pick<AnalysisResult, "confidence" | "b
   return result.confidence >= 0.08 && result.beats.length >= 2 && result.signals.some((point) => point.onset >= 0.05);
 }
 
+export function mergeDirectedSectionPlacements<T extends { id: string; sectionId: string; start: number }>(
+  current: T[],
+  rebuilt: T[],
+  sectionId: string,
+  preserveManualClips = true,
+) {
+  return [
+    ...current.filter((placement) => placement.sectionId !== sectionId || (preserveManualClips && placement.id.startsWith("manual-"))),
+    ...rebuilt,
+  ].sort((a, b) => a.start - b.start);
+}
+
 function frameStats(data: Uint8ClampedArray, previous?: Uint8Array) {
   const gray = new Uint8Array(data.length / 4);
   const histogram = new Float32Array(16);

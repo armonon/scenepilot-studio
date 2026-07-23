@@ -52,6 +52,10 @@ test("keeps the analysis, render, persistence, and standalone engines connected"
   assert.match(page, /accept="video\/\*,audio\/\*"/);
   assert.match(page, /analysis-dock-track/);
   assert.match(page, /formatWait\(analysisEta\)/);
+  assert.match(page, /05 \/ REFINE CUT/);
+  assert.match(page, /RE-ANALYZE MEDIA/);
+  assert.match(page, /composeDirector\(analysis, nextSections, beats\)/);
+  assert.match(page, /mergeDirectedSectionPlacements\(items, rebuiltSection, selectedSectionId, preserveManualClips\)/);
   assert.match(page, /event\.currentTarget\.value = ""/);
   assert.match(page, /pendingSourceUrlRef/);
   assert.match(page, /type ClipTrack =/);
