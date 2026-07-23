@@ -62,6 +62,9 @@ test("keeps the analysis, render, persistence, and standalone engines connected"
   assert.match(analysis, /new VideoSampleSink\(track\)/);
   assert.match(analysis, /Audio source ready; building a visual canvas/);
   assert.match(renderEngine, /new Mp4OutputFormat/);
+  assert.match(renderEngine, /createRenderTrackMetadata\(duration, fps, audioSampleRate\)/);
+  assert.match(renderEngine, /addVideoTrack\(videoSource, trackMetadata\.video\)/);
+  assert.match(renderEngine, /addAudioTrack\(audioSource, trackMetadata\.audio\)/);
   assert.match(renderEngine, /if \(!mainVideoTrack && !audioTrack\)/);
   assert.match(renderEngine, /mainVideoTrack \?/);
   assert.match(renderEngine, /globalCompositeOperation = track/);

@@ -57,6 +57,26 @@ export type RenderOptions = {
   onProgress?: (progress: number, message: string) => void;
 };
 
+export function createRenderTrackMetadata(duration: number, frameRate: number, audioSampleRate?: number | null) {
+  const safeDuration = Number.isFinite(duration) ? Math.max(0, duration) : 0;
+  const safeFrameRate = Number.isFinite(frameRate) ? Math.max(1, frameRate) : 30;
+  const video = {
+    frameRate: safeFrameRate,
+    maximumPacketCount: Math.max(1, Math.ceil(safeDuration * safeFrameRate)),
+  };
+
+  if (!audioSampleRate || !Number.isFinite(audioSampleRate) || audioSampleRate <= 0) {
+    return { video, audio: null };
+  }
+
+  const packetDuration = Math.min(0.01, 512 / audioSampleRate);
+  const expectedPackets = safeDuration / packetDuration;
+  return {
+    video,
+    audio: { maximumPacketCount: Math.max(1, Math.ceil(expectedPackets * 4 / 3) + 32) },
+  };
+}
+
 function fitInside(sourceWidth: number, sourceHeight: number, targetWidth: number, targetHeight: number) {
   const scale = Math.min(targetWidth / sourceWidth, targetHeight / sourceHeight);
   const width = sourceWidth * scale;
@@ -90,6 +110,7 @@ export async function renderProject({ mainFile, assets, placements, tracks = [],
     const mainVideoTrack = await mainInput.getPrimaryVideoTrack();
     const audioTrack = await mainInput.getPrimaryAudioTrack();
     if (!mainVideoTrack && !audioTrack) throw new Error("The main file has no decodable audio or video track.");
+    const audioSampleRate = audioTrack ? await audioTrack.getSampleRate() : null;
     const sourceWidth = mainVideoTrack ? await mainVideoTrack.getDisplayWidth() : 1280;
     const sourceHeight = mainVideoTrack ? await mainVideoTrack.getDisplayHeight() : 720;
     const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
@@ -118,12 +139,16 @@ export async function renderProject({ mainFile, assets, placements, tracks = [],
       });
     }
 
+    const fps = frameRate;
+    const frameDuration = 1 / fps;
+    const frameCount = Math.max(1, Math.ceil(duration * fps));
+    const trackMetadata = createRenderTrackMetadata(duration, fps, audioSampleRate);
     const target = outputStream ? new StreamTarget(outputStream, { chunked: true }) : new BufferTarget();
     output = new Output({ format: new Mp4OutputFormat({ fastStart: outputStream ? "reserve" : "in-memory" }), target });
     const videoSource = new CanvasSource(canvas, { codec: "avc", bitrate: QUALITY_HIGH });
-    output.addVideoTrack(videoSource, { frameRate });
+    output.addVideoTrack(videoSource, trackMetadata.video);
     const audioSource = audioTrack ? new AudioSampleSource({ codec: "aac", bitrate: QUALITY_HIGH }) : null;
-    if (audioSource) output.addAudioTrack(audioSource);
+    if (audioSource && trackMetadata.audio) output.addAudioTrack(audioSource, trackMetadata.audio);
     await output.start();
 
     if (audioTrack && audioSource) {
@@ -136,9 +161,6 @@ export async function renderProject({ mainFile, assets, placements, tracks = [],
       }
     }
 
-    const fps = frameRate;
-    const frameDuration = 1 / fps;
-    const frameCount = Math.max(1, Math.ceil(duration * fps));
     const timestamps = Array.from({ length: frameCount }, (_, index) => index * frameDuration);
     const mainSamples = mainVideoTrack
       ? new VideoSampleSink(mainVideoTrack).samplesAtTimestamps(timestamps)[Symbol.asyncIterator]()
